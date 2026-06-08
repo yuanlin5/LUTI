@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 数据
+data/images/*
+data/*.db
+
+# 导出
+ExportedQB_*/
+
+# 临时文件
+*.tmp
+*.log

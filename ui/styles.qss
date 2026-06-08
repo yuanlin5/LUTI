@@ -1,0 +1,265 @@
+/*
+=============================================================================
+ 全局样式表 —— 控制整个软件的视觉外观
+=============================================================================
+ 本文件使用 Qt StyleSheet (QSS) 语法，类似 CSS。
+
+ 占位符说明：
+   字号（由 config.py 根据缩放比例计算后注入）：
+     {font_base}  {font_title}  {font_section}  {font_small}  {font_big}
+
+   颜色（由 config.py 读取用户配置后注入）：
+     {color_bg}            页面背景色
+     {color_sidebar}       左侧导航栏背景色
+     {color_card}          卡片和输入框背景色
+     {color_primary}       主色调（按钮、选中态、强调元素）
+     {color_primary_hover} 主色按钮悬停
+     {color_text}          正文文字颜色
+     {color_subtext}       次要文字颜色
+     {color_correct}       正确按钮颜色
+     {color_wrong}         错误按钮颜色
+
+ 修改规则：
+   - 要改颜色：修改 config.py 中的对应常量
+   - 要改字号：修改 config.py 中 get_font_sizes() 的基础数值
+   - 要改边距/圆角等：直接修改本文件
+=============================================================================
+*/
+
+/* =====================================================================
+   全局默认
+   ===================================================================== */
+* {
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    font-size: {font_base}px;
+}
+
+QMainWindow, QWidget#centralWidget {
+    background-color: {color_bg};
+}
+
+/* 侧边栏 */
+QWidget#sidebar {
+    background-color: {color_sidebar};
+    border-right: 1px solid #D0DDEB;
+}
+
+QPushButton#navBtn {
+    text-align: left;
+    padding: 14px 20px;
+    border: none;
+    border-radius: 8px;
+    margin: 4px 10px;
+    font-size: 32px;
+    color: {color_text};
+    background-color: transparent;
+}
+
+QPushButton#navBtn:hover {
+    background-color: #D0DDEB;
+}
+
+QPushButton#navBtn:checked {
+    background-color: {color_primary};
+    color: #FFFFFF;
+    font-weight: bold;
+}
+
+/* 内容区标题 */
+QLabel#pageTitle {
+    font-size: {font_title}px;
+    font-weight: bold;
+    color: {color_text};
+    padding: 10px 0;
+}
+
+/* 卡片容器 */
+QFrame#card {
+    background-color: {color_card};
+    border: 1px solid #E0E6ED;
+    border-radius: 10px;
+    padding: 20px;
+}
+
+/* 输入框 */
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {
+    border: 1px solid #D0D7DE;
+    border-radius: 6px;
+    padding: 8px 12px;
+    background-color: {color_card};
+    color: {color_text};
+    font-size: {font_base}px;
+}
+
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
+    border: 1px solid {color_primary};
+}
+
+/* 主要按钮 */
+QPushButton#primaryBtn {
+    background-color: {color_primary};
+    color: #FFFFFF;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 24px;
+    font-size: {font_base}px;
+    font-weight: bold;
+}
+
+QPushButton#primaryBtn:hover {
+    background-color: {color_primary_hover};
+}
+
+QPushButton#primaryBtn:pressed {
+    background-color: #2A6DA8;
+}
+
+/* 次要按钮 */
+QPushButton#secondaryBtn {
+    background-color: {color_card};
+    color: {color_primary};
+    border: 1px solid {color_primary};
+    border-radius: 6px;
+    padding: 10px 24px;
+    font-size: {font_base}px;
+}
+
+QPushButton#secondaryBtn:hover {
+    background-color: {color_sidebar};
+}
+
+/* 正确/错误按钮 */
+QPushButton#correctBtn {
+    background-color: {color_correct};
+    color: #FFFFFF;
+    border: none;
+    border-radius: 6px;
+    padding: 12px 32px;
+    font-size: {font_big}px;
+    font-weight: bold;
+}
+
+QPushButton#correctBtn:hover {
+    background-color: #45A818;
+}
+
+QPushButton#wrongBtn {
+    background-color: {color_wrong};
+    color: #FFFFFF;
+    border: none;
+    border-radius: 6px;
+    padding: 12px 32px;
+    font-size: {font_big}px;
+    font-weight: bold;
+}
+
+QPushButton#wrongBtn:hover {
+    background-color: #D9363E;
+}
+
+/* 小按钮 */
+QPushButton#smallBtn {
+    background-color: {color_primary};
+    color: #FFFFFF;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-size: {font_small}px;
+}
+
+QPushButton#smallBtn:hover {
+    background-color: {color_primary_hover};
+}
+
+/* 危险按钮 */
+QPushButton#dangerBtn {
+    background-color: {color_wrong};
+    color: #FFFFFF;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-size: {font_small}px;
+}
+
+QPushButton#dangerBtn:hover {
+    background-color: #D9363E;
+}
+
+/* 表格 */
+QTableWidget {
+    background-color: {color_card};
+    border: 1px solid #E0E6ED;
+    border-radius: 8px;
+    gridline-color: #F0F0F0;
+}
+
+QTableWidget::item {
+    padding: 8px 12px;
+}
+
+QTableWidget::item:selected {
+    background-color: {color_sidebar};
+    color: {color_text};
+}
+
+QHeaderView::section {
+    background-color: {color_bg};
+    border: none;
+    border-bottom: 2px solid {color_primary};
+    padding: 10px 12px;
+    font-weight: bold;
+    color: {color_text};
+}
+
+/* 滚动条 */
+QScrollBar:vertical {
+    background-color: {color_bg};
+    width: 8px;
+    border: none;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #C0CDDA;
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: {color_primary};
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+/* 标签 chip */
+QFrame#tagChip {
+    background-color: {color_sidebar};
+    border: 1px solid {color_primary};
+    border-radius: 12px;
+    padding: 4px 10px;
+}
+
+QLabel#tagLabel {
+    color: {color_primary};
+    font-size: {font_small}px;
+}
+
+/* 设置页卡片标题 */
+QLabel#sectionTitle {
+    font-size: {font_section}px;
+    font-weight: bold;
+    color: {color_text};
+}
+
+/* 设置页卡片描述 */
+QLabel#sectionDesc {
+    font-size: {font_small}px;
+    color: {color_subtext};
+}
+
+/* 状态标签 */
+QLabel#statusLabel {
+    font-size: {font_base}px;
+    color: {color_subtext};
+}

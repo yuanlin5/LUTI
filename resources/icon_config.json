@@ -1,0 +1,17 @@
+{
+    "_说明": "将你的图标图片放入 resources/icons/ 文件夹，然后在此文件中配置图标名称与文件名的对应关系。",
+    "_格式": "\"图标名称\": \"文件名（含扩展名）\"",
+
+    "app_icon": "main_icon.png",
+    "add_question": "",
+    "question_bank": "",
+    "exam": "",
+    "wrong_collection": "",
+    "settings": "",
+    "voice": "",
+    "image": "",
+    "correct": "",
+    "wrong": "",
+    "previous": "",
+    "next": ""
+}
