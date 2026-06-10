@@ -182,12 +182,16 @@ class ExamPanel(QWidget):
         result_layout.setSpacing(12)
 
         self.result_title = QLabel("考试结果")
-        self.result_title.setStyleSheet("font-size: {font_title}px; font-weight: bold; color: #333333;")
+        title_size = self.settings.get_font_sizes()[1]
+        self.result_title.setStyleSheet(
+            f"font-size: {title_size}px; font-weight: bold; color: #333333;")
         result_layout.addWidget(self.result_title, alignment=Qt.AlignCenter)
 
         self.result_stats = QLabel()
         self.result_stats.setAlignment(Qt.AlignCenter)
-        self.result_stats.setStyleSheet("font-size: {font_big}px; color: #333333;")
+        big_size = self.settings.get_font_sizes()[6]
+        self.result_stats.setStyleSheet(
+            f"font-size: {big_size}px; color: #333333;")
         result_layout.addWidget(self.result_stats)
 
         self.result_detail = QLabel()
@@ -323,12 +327,12 @@ class ExamPanel(QWidget):
             if status:
                 self.judge_status_label.setText("✗ 本题已判为：错误")
                 self.judge_status_label.setStyleSheet(
-                    "color: #FF4D4F; font-weight: bold; font-size: {font_base}px;"
+                    "color: #FF4D4F; font-weight: bold; font-size: %dpx;" % AppSettings().get_font_sizes()[0]
                 )
             else:
                 self.judge_status_label.setText("✓ 本题已判为：正确")
                 self.judge_status_label.setStyleSheet(
-                    "color: #52C41A; font-weight: bold; font-size: {font_base}px;"
+                    "color: #52C41A; font-weight: bold; font-size: %dpx;" % AppSettings().get_font_sizes()[0]
                 )
             self.judge_status_label.setVisible(True)
 
@@ -395,12 +399,12 @@ class ExamPanel(QWidget):
         if is_wrong:
             self.judge_status_label.setText("✗ 本题已判为：错误")
             self.judge_status_label.setStyleSheet(
-                "color: #FF4D4F; font-weight: bold; font-size: {font_base}px;"
+                "color: #FF4D4F; font-weight: bold; font-size: %dpx;" % AppSettings().get_font_sizes()[0]
             )
         else:
             self.judge_status_label.setText("✓ 本题已判为：正确")
             self.judge_status_label.setStyleSheet(
-                "color: #52C41A; font-weight: bold; font-size: {font_base}px;"
+                "color: #52C41A; font-weight: bold; font-size: %dpx;" % AppSettings().get_font_sizes()[0]
             )
         self.judge_status_label.setVisible(True)
         self._update_nav_buttons()
@@ -470,3 +474,21 @@ class ExamPanel(QWidget):
     def on_shown(self):
         """面板切换为可见时调用：重置考试界面到初始状态"""
         self._reset_exam()
+        self.update_dynamic_styles()
+
+    def update_dynamic_styles(self):
+        """字体缩放后重新应用动态样式"""
+        s = AppSettings()
+        style = s.build_dynamic_style
+        self.result_title.setStyleSheet(
+            style("font-size: {font_title}px; font-weight: bold; color: #333333;"))
+        self.result_stats.setStyleSheet(
+            style("font-size: {font_big}px; color: #333333;"))
+        # 更新判断状态标签（如有当前题目的判断结果）
+        status = self.answer_status.get(self.current_index)
+        if status is True:
+            self.judge_status_label.setStyleSheet(
+                style("color: #FF4D4F; font-weight: bold; font-size: {font_base}px;"))
+        elif status is False:
+            self.judge_status_label.setStyleSheet(
+                style("color: #52C41A; font-weight: bold; font-size: {font_base}px;"))

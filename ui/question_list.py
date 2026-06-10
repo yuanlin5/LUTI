@@ -260,6 +260,12 @@ class QuestionListPanel(QWidget):
         cat_id = self.cat_filter.currentData()
         tag_id = self.tag_filter.currentData()
 
+        # 保护：若当前选中项为 None 且索引 > 2（分隔线区域），跳过
+        if cat_id is None:
+            idx = self.cat_filter.currentIndex()
+            if idx > 2 and idx < self.cat_filter.count() - len(models.get_all_categories()):
+                return
+
         self._selected_ids.clear()  # 筛选条件变化 → 旧选择失效
         if cat_id == -1:
             self.all_questions = models.get_starred_questions(keyword, None)
@@ -1053,6 +1059,10 @@ class QuestionListPanel(QWidget):
         self._do_search()
         QTimer.singleShot(100, self._adjust_columns_delayed)
 
+    def update_dynamic_styles(self):
+        """字体缩放后重新渲染表格"""
+        self._refresh_table()
+
     def _adjust_columns_delayed(self):
         self._restore_columns()
         self._apply_layout()
@@ -1105,7 +1115,15 @@ class QuestionListPanel(QWidget):
         self.cat_filter.addItem("全部分类", None)
         self.cat_filter.addItem("★ 星标收藏夹", -1)
         self.cat_filter.addItem("✗ 错题集", -2)
-        self.cat_filter.insertSeparator(3)
+        # 用禁用的分隔线替代 insertSeparator（避免分隔符被选中导致闪退）
+        self.cat_filter.addItem("──────────")
+        idx = self.cat_filter.count() - 1
+        model = self.cat_filter.model()
+        if model:
+            item = model.item(idx)
+            if item:
+                item.setEnabled(False)
+                item.setSelectable(False)
         for cat in models.get_all_categories():
             self.cat_filter.addItem(cat["name"], cat["id"])
 

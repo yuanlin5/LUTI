@@ -27,6 +27,12 @@ from ui.settings_panel import SettingsPanel
 class MainWindow(MSFluentWindow):
     """主窗口：Fluent 侧边栏 + QStackedWidget 切换 4 个功能面板"""
 
+    def switchTo(self, interface):
+        """切换面板并自动触发 on_shown"""
+        super().switchTo(interface)
+        if hasattr(interface, 'on_shown'):
+            interface.on_shown()
+
     def __init__(self):
         super().__init__()
         self.settings = AppSettings()
@@ -43,12 +49,13 @@ class MainWindow(MSFluentWindow):
         self._load_app_icon()
         self._setup_panels()
         self._setup_navigation()
-        self._setup_menu()
         self._connect_signals()
 
-        # 默认显示录入题目
+        # 加载全局样式表
+        self._apply_stylesheet()
+
+        # 默认显示录入题目（switchTo 自动触发 on_shown）
         self.switchTo(self.add_question_panel)
-        self.add_question_panel.on_shown()
 
         QApplication.instance().installEventFilter(self)
 
@@ -59,30 +66,26 @@ class MainWindow(MSFluentWindow):
         self.exam_panel = ExamPanel()
         self.settings_panel = SettingsPanel()
 
-        # 设置 objectName（Fluent 要求不能为空字符串）
-        for route, panel in [
-            ("addQuestion", self.add_question_panel),
-            ("questionList", self.question_list_panel),
-            ("examPanel", self.exam_panel),
-            ("settingsPanel", self.settings_panel),
-        ]:
+        # 注册面板——使用中文名称 + 对应图标
+        # (routeKey, panel, icon, position)
+        panel_configs = [
+            ("录入题目", self.add_question_panel, FluentIcon.EDIT,
+             NavigationItemPosition.TOP),
+            ("题库管理", self.question_list_panel, FluentIcon.LIBRARY,
+             NavigationItemPosition.TOP),
+            ("组卷考试", self.exam_panel, FluentIcon.EDUCATION,
+             NavigationItemPosition.TOP),
+            ("设置", self.settings_panel, FluentIcon.SETTING,
+             NavigationItemPosition.BOTTOM),
+        ]
+        for route, panel, icon, pos in panel_configs:
             panel.setObjectName(route)
-            self.addSubInterface(panel, FluentIcon.HOME, route)
+            self.addSubInterface(panel, icon, route, position=pos)
 
     def _setup_navigation(self):
         nav = self.navigationInterface
 
-        nav.addItem("addQuestion", FluentIcon.EDIT, "录入题目",
-                     onClick=lambda: self._nav_to(0))
-        nav.addItem("questionList", FluentIcon.LIBRARY, "题库管理",
-                     onClick=lambda: self._nav_to(1))
-        nav.addItem("examPanel", FluentIcon.EDUCATION, "组卷考试",
-                     onClick=lambda: self._nav_to(2))
-        nav.addItem("settingsPanel", FluentIcon.SETTING, "设置",
-                     onClick=lambda: self._show_settings(),
-                     position=NavigationItemPosition.BOTTOM)
-
-        # 底部版本标签（用 PushButton 替代 QLabel，因导航栏需要 clicked 信号）
+        # 底部版本标签
         ver_btn = PushButton("v1.0 — 王若水")
         ver_btn.setFlat(True)
         ver_btn.setStyleSheet("color: #888; font-size: 12px;")
@@ -102,31 +105,44 @@ class MainWindow(MSFluentWindow):
 
     # ── 导航回调 ──────────────────────────────────────────────────
     def _nav_to(self, idx):
-        """跳转面板并触发 on_shown"""
+        """跳转面板（switchTo 自动触发 on_shown）"""
+        route_keys = ["录入题目", "题库管理", "组卷考试"]
         panels = [self.add_question_panel, self.question_list_panel,
                    self.exam_panel]
         if 0 <= idx < len(panels):
+            self.navigationInterface.setCurrentItem(route_keys[idx])
             self.switchTo(panels[idx])
-            panels[idx].on_shown()
 
     def _show_settings(self):
-        self.navigationInterface.setCurrentItem("settingsPanel")
+        self.navigationInterface.setCurrentItem("设置")
         self.switchTo(self.settings_panel)
-        self.settings_panel.on_shown()
-
-    def _switch_and_export(self):
-        self.switchTo(self.question_list_panel)
-        self.question_list_panel.on_shown()
-        self.question_list_panel._export_questions()
 
     def _on_edit_question(self, qid):
-        self.navigationInterface.setCurrentItem("addQuestion")
+        self.navigationInterface.setCurrentItem("录入题目")
         self.switchTo(self.add_question_panel)
         self.add_question_panel.load_question(qid)
 
+    # ── 全局样式 ──────────────────────────────────────────────────
+    def _apply_stylesheet(self):
+        """加载并应用全局 QSS 样式表"""
+        try:
+            qss_path = _os.path.join(_os.path.dirname(
+                _os.path.abspath(__file__)), "styles.qss")
+            if _os.path.exists(qss_path):
+                qss = self.settings.build_stylesheet(qss_path)
+                QApplication.instance().setStyleSheet(qss)
+        except Exception:
+            pass
+
     # ── 信号处理 ──────────────────────────────────────────────────
     def _on_font_changed(self):
+        # 重新加载全局样式表（字号已通过 settings 更新）
+        self._apply_stylesheet()
+        # 更新各面板中的动态样式
         self.add_question_panel.update_input_heights()
+        self.add_question_panel.update_dynamic_styles()
+        self.exam_panel.update_dynamic_styles()
+        self.question_list_panel.update_dynamic_styles()
 
     def _on_input_lines_changed(self):
         self.add_question_panel.update_input_heights()
@@ -136,6 +152,11 @@ class MainWindow(MSFluentWindow):
 
     def _on_exam_default_changed(self, count):
         self.exam_panel.set_default_count(count)
+
+    def _switch_and_export(self):
+        self.navigationInterface.setCurrentItem("题库管理")
+        self.switchTo(self.question_list_panel)  # on_shown 已在 switchTo 中自动调用
+        self.question_list_panel._export_questions()
 
     # ── 图标 + 关于 ───────────────────────────────────────────────
     def _load_app_icon(self):

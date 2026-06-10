@@ -218,7 +218,16 @@ class AppSettings:
         base, title, nav, section, sidebar, small, big = self.get_font_sizes()
         with open(qss_path, "r", encoding="utf-8") as f:
             qss = f.read()
-        return (qss
+        return self._replace_placeholders(qss)
+
+    def build_dynamic_style(self, style_string):
+        """替换单个样式字符串中的字号/颜色占位符（用于硬编码 setStyleSheet 调用）"""
+        return self._replace_placeholders(style_string)
+
+    def _replace_placeholders(self, text):
+        """替换字号和颜色占位符为实际数值"""
+        base, title, nav, section, sidebar, small, big = self.get_font_sizes()
+        return (text
             .replace("{font_base}", str(base))
             .replace("{font_title}", str(title))
             .replace("{font_nav}", str(nav))

@@ -259,7 +259,8 @@ class SettingsPanel(QWidget):
         new_count = self.exam_count_spin.value()
         self.settings.set_default_exam_count(new_count)
         self.status_label.setText("设置已保存")
-        self.status_label.setStyleSheet("color: #52C41A; font-size: {font_base}px;")
+        base_size = self.settings.get_font_sizes()[0]
+        self.status_label.setStyleSheet(f"color: #52C41A; font-size: {base_size}px;")
         self.exam_default_changed.emit(new_count)
 
     def get_default_exam_count(self):
@@ -286,3 +287,11 @@ class SettingsPanel(QWidget):
         self.image_quality_combo.setCurrentIndex(max(0, idx_q))
         self.exam_count_spin.setValue(self.settings.default_exam_count)
         self.status_label.clear()
+        self.update_dynamic_styles()
+
+    def update_dynamic_styles(self):
+        """字体缩放后重新应用动态样式"""
+        s = AppSettings()
+        style = s.build_dynamic_style
+        self.status_label.setStyleSheet(
+            style("color: #52C41A; font-size: {font_base}px;"))

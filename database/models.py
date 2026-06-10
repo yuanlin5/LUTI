@@ -34,7 +34,10 @@ def add_category(name):
         conn.commit()
         return True, "添加成功"
     except Exception as e:
-        return False, str(e)
+        err = str(e)
+        if "UNIQUE" in err.upper():
+            return False, f"分类「{name.strip()}」已存在，请使用其他名称。"
+        return False, f"添加分类失败：{err}"
     finally:
         conn.close()
 
@@ -85,7 +88,10 @@ def add_tag(name, color='#4A90D9'):
         conn.commit()
         return cur.lastrowid, None
     except Exception as e:
-        return None, str(e)
+        err = str(e)
+        if "UNIQUE" in err.upper():
+            return None, f"标签「{name.strip()}」已存在。"
+        return None, f"添加标签失败：{err}"
     finally:
         conn.close()
 
