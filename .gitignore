@@ -19,3 +19,13 @@ ExportedQB_*/
 # 临时文件
 *.tmp
 *.log
+*.spec
+*.manifest
+
+# 测试/覆盖率
+.pytest_cache/
+htmlcov/
+.coverage
+
+# 环境
+.env
