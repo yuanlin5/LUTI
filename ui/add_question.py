@@ -608,10 +608,14 @@ class AddQuestionPanel(QWidget):
         The first entry is always "无分类" (no category) with data ``None``,
         followed by every category row in the database.
         """
+        self.category_combo.blockSignals(True)
         self.category_combo.clear()
-        self.category_combo.addItem("无分类", None)
+        self.category_combo.addItem("无分类", userData=None)
         for cat in models.get_all_categories():
-            self.category_combo.addItem(cat["name"], cat["id"])
+            self.category_combo.addItem(cat["name"], userData=cat["id"])
+        if self.category_combo.count() > 0:
+            self.category_combo.setCurrentIndex(0)
+        self.category_combo.blockSignals(False)
 
     # ------------------------------------------------------------------
     #  Tag management

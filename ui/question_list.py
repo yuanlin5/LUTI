@@ -256,23 +256,36 @@ class QuestionListPanel(QWidget):
 
     def _do_search(self):
         """执行搜索：支持普通分类、星标收藏夹(-1)、错题集(-2)"""
-        keyword = self.search_input.text().strip()
-        cat_id = self.cat_filter.currentData()
-        tag_id = self.tag_filter.currentData()
+        # 刷新期间不响应
+        if getattr(self, '_refreshing', False):
+            return
+        try:
+            keyword = self.search_input.text().strip()
+            cat_id = self.cat_filter.currentData()
+            tag_id = self.tag_filter.currentData()
+        except Exception:
+            return
 
-        # 保护：若当前选中项为 None 且索引 > 2（分隔线区域），跳过
+        # 保护：若当前为禁用的分隔符项，跳过
         if cat_id is None:
             idx = self.cat_filter.currentIndex()
-            if idx > 2 and idx < self.cat_filter.count() - len(models.get_all_categories()):
-                return
+            if 0 <= idx < len(self.cat_filter.items):
+                try:
+                    if not self.cat_filter.items[idx].isEnabled():
+                        return
+                except Exception:
+                    pass
 
         self._selected_ids.clear()  # 筛选条件变化 → 旧选择失效
-        if cat_id == -1:
-            self.all_questions = models.get_starred_questions(keyword, None)
-        elif cat_id == -2:
-            self.all_questions = models.get_wrong_questions(keyword, None)
-        else:
-            self.all_questions = models.search_questions(keyword, cat_id, tag_id)
+        try:
+            if cat_id == -1:
+                self.all_questions = models.get_starred_questions(keyword, None)
+            elif cat_id == -2:
+                self.all_questions = models.get_wrong_questions(keyword, None)
+            else:
+                self.all_questions = models.search_questions(keyword, cat_id, tag_id)
+        except Exception:
+            self.all_questions = []
         # 附加 _tags_str 用于排序
         for q in self.all_questions:
             tags = models.get_question_tags(q["id"])
@@ -1108,44 +1121,50 @@ class QuestionListPanel(QWidget):
 
     def _refresh_filters(self):
         """重新加载分类和标签下拉框（含星标/错题特殊分类）"""
+        # 使用 refreshing 标记防止 _do_search 在重建期间被触发
+        self._refreshing = True
+
         self.cat_filter.blockSignals(True)
         self.tag_filter.blockSignals(True)
 
-        self.cat_filter.clear()
-        self.cat_filter.addItem("全部分类", None)
-        self.cat_filter.addItem("★ 星标收藏夹", -1)
-        self.cat_filter.addItem("✗ 错题集", -2)
-        # 用禁用的分隔线替代 insertSeparator（避免分隔符被选中导致闪退）
-        self.cat_filter.addItem("──────────")
-        idx = self.cat_filter.count() - 1
-        model = self.cat_filter.model()
-        if model:
-            item = model.item(idx)
-            if item:
-                item.setEnabled(False)
-                item.setSelectable(False)
-        for cat in models.get_all_categories():
-            self.cat_filter.addItem(cat["name"], cat["id"])
+        try:
+            self.cat_filter.clear()
+            self.cat_filter.addItem("全部分类", userData=None)
+            self.cat_filter.addItem("★ 星标收藏夹", userData=-1)
+            self.cat_filter.addItem("✗ 错题集", userData=-2)
+            # 分隔线：用 setItemEnabled(False) 禁掉
+            self.cat_filter.addItem("──────────")
+            self.cat_filter.setItemEnabled(3, False)
+            for cat in models.get_all_categories():
+                self.cat_filter.addItem(cat["name"], userData=cat["id"])
+        finally:
+            pass
 
         self.tag_filter.clear()
-        self.tag_filter.addItem("全部标签", None)
+        self.tag_filter.addItem("全部标签", userData=None)
         for tag in models.get_all_tags():
-            self.tag_filter.addItem(tag["name"], tag["id"])
+            self.tag_filter.addItem(tag["name"], userData=tag["id"])
+
+        # 先恢复 cat_filter 确保 currentIndex 正确再解除 blocking
+        if self.cat_filter.count() > 0:
+            self.cat_filter.setCurrentIndex(0)
 
         self.cat_filter.blockSignals(False)
         self.tag_filter.blockSignals(False)
 
+        self._refreshing = False
+
         # 显示/隐藏分类操作按钮
         self._update_cat_btns()
 
-        # 标签右键菜单
-        tag_view = self.tag_filter.view()
-        tag_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        # 标签右键菜单 — 设在 ComboBox 自身上（qfluentwidgets 版无 view()）
+        self.tag_filter.setContextMenuPolicy(Qt.CustomContextMenu)
         try:
-            tag_view.customContextMenuRequested.disconnect()
+            self.tag_filter.customContextMenuRequested.disconnect()
         except Exception:
             pass
-        tag_view.customContextMenuRequested.connect(self._on_tag_context_menu)
+        self.tag_filter.customContextMenuRequested.connect(
+            self._on_tag_context_menu)
 
     def _edit_tag_dialog(self, tag_id):
         """点击标签徽章 → 编辑标签"""
@@ -1209,12 +1228,8 @@ class QuestionListPanel(QWidget):
 
     def _on_tag_context_menu(self, pos):
         """标签右键菜单：编辑 / 删除"""
-        view = self.tag_filter.view()
-        idx = view.indexAt(pos)
-        if not idx.isValid():
-            return
-        tag_id = self.tag_filter.itemData(idx.row())
-        tag_name = self.tag_filter.itemText(idx.row())
+        tag_id = self.tag_filter.currentData()
+        tag_name = self.tag_filter.currentText()
         if tag_id is None:
             return
         all_tags = models.get_all_tags()
@@ -1225,7 +1240,7 @@ class QuestionListPanel(QWidget):
         menu = QMenu(self)
         edit_action = menu.addAction("编辑标签")
         del_action = menu.addAction("删除标签")
-        action = menu.exec_(view.mapToGlobal(pos))
+        action = menu.exec_(self.tag_filter.mapToGlobal(pos))
 
         if action == edit_action:
             self._show_tag_editor(tag_id, tag_name, tag_info.get("color", "#4A90D9"))
