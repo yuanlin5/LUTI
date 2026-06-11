@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
     QDialog, QCheckBox, QDialogButtonBox, QColorDialog,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent, QItemSelection
-from PyQt5.QtGui import QPixmap, QIcon, QFontMetrics, QKeySequence
+from PyQt5.QtGui import QPixmap, QIcon, QFontMetrics, QKeySequence, QColor
 from qfluentwidgets import (
     PrimaryPushButton, PushButton, TransparentPushButton,
     ComboBox, LineEdit, CardWidget,
@@ -712,13 +712,35 @@ class QuestionListPanel(QWidget):
         super().keyPressEvent(event)
 
     def _update_selection_status(self):
-        """选择变化时更新底部统计标签（显示已选中数量）"""
+        """选择变化时更新底部统计标签 + 高亮行列表头"""
         count = len(self._selected_ids)
         total = len(self.all_questions)
         if count:
             self.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
         else:
             self.stats_label.setText(f"共 {total} 道题目")
+        self._highlight_headers()
+
+    def _highlight_headers(self):
+        """高亮有选中单元格的行号和列标（浅蓝背景）"""
+        sel_model = self.table.selectionModel()
+        selected_rows = set()
+        selected_cols = set()
+        for idx in sel_model.selectedIndexes():
+            selected_rows.add(idx.row())
+            selected_cols.add(idx.column())
+        hl = QColor("#D2E3FC")
+        df = QColor(255, 255, 255)
+        vh = self.table.verticalHeader()
+        for r in range(self.table.rowCount()):
+            vh.model().setData(vh.model().index(r, 0),
+                               hl if r in selected_rows else df,
+                               Qt.BackgroundRole)
+        hh = self.table.horizontalHeader()
+        for c in range(self._col_count):
+            hh.model().setData(hh.model().index(c, 0),
+                               hl if c in selected_cols else df,
+                               Qt.BackgroundRole)
 
     def _on_cell_pressed(self, row, col):
         """鼠标按下 → 记录起始行号（供 eventFilter 拖拽检测使用）"""
@@ -1058,6 +1080,20 @@ class QuestionListPanel(QWidget):
             if event.type() == QEvent.MouseButtonRelease:
                 self._auto_scroll_timer.stop()
                 self._dragging = False
+            elif event.type() == QEvent.MouseButtonPress:
+                if event.modifiers() & Qt.ControlModifier:
+                    # Ctrl+单击：手动切换该单元格选中状态，解决 widget 列无法参与 Ctrl+多选的 bug
+                    pos = event.pos()
+                    row = self.table.rowAt(pos.y())
+                    col = self.table.columnAt(pos.x())
+                    if row >= 0 and col >= 0:
+                        idx = self.table.model().index(row, col)
+                        sel = self.table.selectionModel()
+                        if sel.isSelected(idx):
+                            sel.select(idx, sel.Deselect)
+                        else:
+                            sel.select(idx, sel.Select)
+                        return True
             elif event.type() == QEvent.Wheel:
                 if event.modifiers() & Qt.ShiftModifier:
                     bar = self.table.horizontalScrollBar()
