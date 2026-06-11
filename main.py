@@ -16,7 +16,6 @@ import os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
 from database.db_manager import init_db   # 数据库建表
 from ui.main_window import MainWindow     # 主窗口
 
@@ -27,7 +26,6 @@ def main():
     init_db()
 
     # 2. 创建 Qt 应用程序实例
-    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)  # WebEngine 兼容
     app = QApplication(sys.argv)
     app.setApplicationName("我的题库")
 
