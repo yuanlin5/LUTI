@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QMessageBox, QMenu, QStyle,
     QFileDialog, QProgressDialog, QApplication, QInputDialog,
     QDialog, QCheckBox, QDialogButtonBox, QColorDialog,
-    QStyledItemDelegate, QStyleOptionButton,
+    QStyledItemDelegate, QStyleOptionButton, QStyleOptionViewItem,
 )
 from PyQt5.QtCore import (
     Qt, pyqtSignal, QTimer, QEvent, QItemSelection,
@@ -246,7 +246,11 @@ class QuestionDelegate(QStyledItemDelegate):
         elif col == COL_QUESTION:
             self._paint_question(painter, option, index)
         else:
-            super().paint(painter, option, index)
+            # 强制自动换行：不省略，设置 WrapText 特性
+            opt = QStyleOptionViewItem(option)
+            opt.features |= QStyleOptionViewItem.WrapText
+            opt.textElideMode = Qt.ElideNone
+            super().paint(painter, opt, index)
 
     def sizeHint(self, option, index):
         col = index.column()
@@ -305,13 +309,14 @@ class QuestionDelegate(QStyledItemDelegate):
                         th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
                                              Qt.TextWordWrap, text).height() + 4
                     return QSize(option.rect.width(), max(48, ih + th + 8))
-        # 默认列：根据文字内容 + 列宽计算自动换行高度
+        # 默认列：用列实际宽度计算换行高度
         text = index.data(Qt.DisplayRole)
-        if text:
-            fm = QFontMetrics(option.font)
-            col_w = max(60, option.rect.width() - 8)
-            h = fm.boundingRect(0, 0, col_w, 0, Qt.TextWordWrap, str(text)).height() + 16
-            return QSize(col_w, max(30, h))
+        if text and self._panel:
+            col_w = self._panel.table.columnWidth(col) - 8
+            if col_w > 20:
+                fm = QFontMetrics(option.font)
+                h = fm.boundingRect(0, 0, col_w, 0, Qt.TextWordWrap, str(text)).height() + 16
+                return QSize(col_w, max(30, h))
         return super().sizeHint(option, index)
 
     def editorEvent(self, event, model, option, index):
@@ -684,6 +689,7 @@ class QuestionListPanel(QWidget):
         self.table.horizontalHeader()._table_ref = self.table
         vh = self.table.verticalHeader()
         vh.setSectionsClickable(True)
+        vh.setSectionResizeMode(QHeaderView.Interactive)  # 允许手动调节行高
         vh.sectionClicked.connect(self._on_row_header_clicked)
         hh = self.table.horizontalHeader()
         hh.setSectionsClickable(True)
@@ -879,8 +885,11 @@ class QuestionListPanel(QWidget):
             # 更新UI
             self._update_pagination(total, total_pages)
             self._on_selection_changed()
-            # 行高刷新
-            QTimer.singleShot(50, self.table.resizeRowsToContents)
+            # 列宽+行高刷新
+            QTimer.singleShot(80, lambda: (
+                self.table.resizeColumnsToContents(),
+                self.table.resizeRowsToContents()
+            ))
         finally:
             self._refreshing_table = False
 
