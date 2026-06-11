@@ -3,12 +3,13 @@
  主窗口 —— Fluent 侧边栏导航 + 多页面内容区
 =============================================================================
 """
+import sys, subprocess
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QStackedWidget, QLabel,
     QMessageBox, QApplication,
 )
 from PyQt5.QtCore import Qt, QEvent, QRectF, QRect
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QFont
 from qfluentwidgets import (
     MSFluentWindow, NavigationInterface, NavigationItemPosition,
     FluentIcon, setTheme, Theme, InfoBar, InfoBarPosition,
@@ -132,6 +133,7 @@ class MainWindow(MSFluentWindow):
         self._connect_signals()
         self._apply_stylesheet()
         self._fix_sidebar()
+        self._setup_restart_button()
         self.switchTo(self.add_question_panel)
         QApplication.instance().installEventFilter(self)
 
@@ -211,6 +213,49 @@ class MainWindow(MSFluentWindow):
 
         # 侧栏宽度
         nav.setMinimumWidth(165)
+
+    # ── 一键重启 ──
+    def _setup_restart_button(self):
+        """右下角临时重启按钮"""
+        self._restart_btn = PushButton("⟳ 重启")
+        self._restart_btn.setFixedSize(80, 32)
+        self._restart_btn.setStyleSheet("""
+            PushButton {
+                background: #0078D4; color: white;
+                border-radius: 6px; font-size: 13px; font-weight: bold;
+            }
+            PushButton:hover {
+                background: #106EBE;
+            }
+            PushButton:pressed {
+                background: #005A9E;
+            }
+        """)
+        self._restart_btn.clicked.connect(self._restart_app)
+        self._restart_btn.setParent(self)
+        self._restart_btn.raise_()
+        self._restart_btn.show()
+
+    def _restart_app(self):
+        """重启应用程序"""
+        reply = QMessageBox.question(
+            self, "确认重启", "确定要重启软件吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            subprocess.Popen([sys.executable] + sys.argv)
+            QApplication.quit()
+
+    def _position_restart_button(self):
+        """将重启按钮定位到窗口右下角"""
+        x = self.width() - self._restart_btn.width() - 20
+        y = self.height() - self._restart_btn.height() - 20
+        self._restart_btn.move(x, y)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_restart_btn'):
+            self._position_restart_button()
 
     # ── 信号连接 ──
     def _connect_signals(self):
