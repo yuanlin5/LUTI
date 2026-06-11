@@ -35,12 +35,13 @@ PAGE_SIZE = 20
 THUMB_SIZE = 50
 
 # 列索引常量（方便引用）
-COL_SEL, COL_IDX, COL_UID, COL_STAR, COL_QUESTION, COL_CAT = range(6)
-COL_TAGS, COL_ANSWER, COL_NOTES, COL_WRONG, COL_DATE, COL_OPS = range(6, 12)
+# 列索引（选中状态移到最后）
+COL_IDX, COL_UID, COL_STAR, COL_QUESTION, COL_CAT = range(5)
+COL_TAGS, COL_ANSWER, COL_NOTES, COL_WRONG, COL_DATE, COL_SEL, COL_OPS = range(5, 12)
 COL_COUNT = 12
 
-HEADERS = ["选中状态", "序号", "初始编号", "星标", "题目", "分类",
-           "标签", "答案", "备注", "错次", "最近修改", "操作"]
+HEADERS = ["序号", "初始编号", "星标", "题目", "分类",
+           "标签", "答案", "备注", "错次", "最近修改", "选中状态", "操作"]
 # 可排序列（索引 → key 函数）
 SORT_KEYS = {
     COL_UID:      lambda q: q.get("uid", ""),
@@ -120,6 +121,8 @@ class QuestionTableModel(QAbstractTableModel):
             if u and len(u) > 16:
                 return u[:10].replace("-", "/") + " " + u[11:19]
             return u or "-"
+        if col == COL_SEL:
+            return ""
         return ""
 
     def _alignment(self, col):
@@ -251,32 +254,52 @@ class QuestionDelegate(QStyledItemDelegate):
             return QSize(40, 48)
         if col == COL_OPS:
             return QSize(180, 48)
-        # 题目/答案列：文本 + 图片高度
-        if col in (COL_QUESTION, COL_ANSWER):
+        # 题目列：文本 + 图片高度
+        if col == COL_QUESTION:
             q = index.data(Qt.UserRole)
             if q:
                 q_imgs, a_imgs = index.data(Qt.UserRole + 1)
-                imgs = q_imgs if col == COL_QUESTION else a_imgs
                 ih = 0
-                if imgs and os.path.exists(imgs[0]["image_path"]):
-                    pixmap = QPixmap(imgs[0]["image_path"])
-                    col_w = option.rect.width() - 8
-                    if pixmap.width() > col_w and col_w > 0:
-                        pixmap = pixmap.scaledToWidth(col_w, Qt.SmoothTransformation)
-                    elif self._panel:
-                        mode = AppSettings().image_display_mode
-                        if mode != "full" and pixmap.width() > THUMB_SIZE:
-                            pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
-                                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                if q_imgs and os.path.exists(q_imgs[0]["image_path"]):
+                    pixmap = QPixmap(q_imgs[0]["image_path"])
+                    col_w = max(50, option.rect.width() - 8)
+                    mode = AppSettings().image_display_mode
+                    if mode == "full":
+                        if pixmap.width() > col_w:
+                            pixmap = pixmap.scaledToWidth(col_w, Qt.SmoothTransformation)
+                    else:
+                        pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
+                                               Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     ih = pixmap.height() + 4
-                text = q.get("question_text" if col == COL_QUESTION else "answer_text", "")
+                text = q.get("question_text", "")
                 th = 0
                 if text:
                     fm = QFontMetrics(option.font)
-                    th = fm.boundingRect(0, 0, option.rect.width() - 8, 0,
+                    th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
                                          Qt.TextWordWrap, text).height() + 4
-                h = max(48, ih + th + 8)
-                return QSize(option.rect.width(), h)
+                return QSize(option.rect.width(), max(48, ih + th + 8))
+        # 答案列：展开时计算完整高度，收起时用按钮高度
+        if col == COL_ANSWER:
+            panel = self._panel
+            expanded = panel and index.row() in getattr(panel, '_expanded_answers', set())
+            if expanded:
+                q = index.data(Qt.UserRole)
+                if q:
+                    q_imgs, a_imgs = index.data(Qt.UserRole + 1)
+                    ih = 0
+                    if a_imgs and os.path.exists(a_imgs[0]["image_path"]):
+                        pixmap = QPixmap(a_imgs[0]["image_path"])
+                        col_w = max(50, option.rect.width() - 8)
+                        if pixmap.width() > col_w:
+                            pixmap = pixmap.scaledToWidth(col_w, Qt.SmoothTransformation)
+                        ih = pixmap.height() + 4
+                    text = q.get("answer_text", "")
+                    th = 0
+                    if text:
+                        fm = QFontMetrics(option.font)
+                        th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
+                                             Qt.TextWordWrap, text).height() + 4
+                    return QSize(option.rect.width(), max(48, ih + th + 8))
         return super().sizeHint(option, index)
 
     def editorEvent(self, event, model, option, index):
@@ -444,10 +467,10 @@ class QuestionDelegate(QStyledItemDelegate):
             else:
                 expanded.add(row)
             self._panel._expanded_answers = expanded
-            # 触发整行重绘
+            # 触发重绘 → 新 sizeHint → 延迟调高度
             model.dataChanged.emit(
                 model.index(row, 0), model.index(row, COL_COUNT - 1))
-            self._panel._update_row_height(row)
+            QTimer.singleShot(10, lambda r=row: self._panel._update_row_height(r))
             return True
         return False
 
@@ -536,6 +559,7 @@ class QuestionListPanel(QWidget):
         self._sort_state = 0
         self._original_order = []
         self._persistent_selected_ids = set()
+        self._refreshing_table = False
         self._expanded_answers = set()
         self._dragging = False
         self._auto_scroll_dir = 0
@@ -686,7 +710,7 @@ class QuestionListPanel(QWidget):
         # 列筛选菜单
         self._col_menu = QMenu(self)
         for c in range(COL_COUNT):
-            if c in (COL_SEL, COL_IDX, COL_OPS):
+            if c in (COL_IDX, COL_OPS):        # 允许 COL_SEL 在筛选器中
                 continue
             action = self._col_menu.addAction(HEADERS[c])
             action.setCheckable(True)
@@ -727,19 +751,17 @@ class QuestionListPanel(QWidget):
     def _setup_columns(self):
         hh = self.table.horizontalHeader()
         fm = QFontMetrics(hh.font())
-        # 固定列宽度（根据表头文字计算 + 最小边距）
         def _w(text, min_w=60):
             return max(min_w, fm.width(text) + 24)
-        # 固定列
-        for c, w in [(COL_SEL, _w(HEADERS[COL_SEL])),
-                     (COL_IDX, _w(HEADERS[COL_IDX], 70)),
+        # 固定列（序号和操作固定，其他可拖拽）
+        for c, w in [(COL_IDX, _w(HEADERS[COL_IDX], 80)),
                      (COL_OPS, 180)]:
             self.table.setColumnWidth(c, w)
             hh.setSectionResizeMode(c, QHeaderView.Fixed)
-        # 可拉伸列（列宽也能容纳表头文字）
-        stretch_cols = [COL_UID, COL_STAR, COL_QUESTION, COL_CAT,
-                        COL_TAGS, COL_ANSWER, COL_NOTES, COL_WRONG, COL_DATE]
-        for c in stretch_cols:
+        # 可调整列：全部 Interactive，无 Stretch → 可无限右扩展
+        interactive_cols = [COL_UID, COL_STAR, COL_QUESTION, COL_CAT,
+                           COL_TAGS, COL_ANSWER, COL_NOTES, COL_WRONG, COL_DATE, COL_SEL]
+        for c in interactive_cols:
             hh.setSectionResizeMode(c, QHeaderView.Interactive)
         self.table.setColumnWidth(COL_UID, _w(HEADERS[COL_UID], 140))
         self.table.setColumnWidth(COL_STAR, _w(HEADERS[COL_STAR], 50))
@@ -750,9 +772,9 @@ class QuestionListPanel(QWidget):
         self.table.setColumnWidth(COL_NOTES, _w(HEADERS[COL_NOTES], 100))
         self.table.setColumnWidth(COL_WRONG, _w(HEADERS[COL_WRONG], 60))
         self.table.setColumnWidth(COL_DATE, _w(HEADERS[COL_DATE], 140))
-        # 题目列自动拉伸
+        self.table.setColumnWidth(COL_SEL, _w(HEADERS[COL_SEL], 70))
+        # 不拉伸最后一列，允许水平滚动
         hh.setStretchLastSection(False)
-        hh.setSectionResizeMode(COL_QUESTION, QHeaderView.Stretch)
 
     def _setup_shortcuts(self):
         self._shortcut_actions = {
@@ -767,7 +789,7 @@ class QuestionListPanel(QWidget):
             "jump_edge_right": lambda: self._jump_to_data_edge('right'),
             "prev_page": self._prev_page,
             "next_page": self._next_page,
-            "clear_selection": lambda: self.table.clearSelection(),
+            "clear_selection": self._clear_all_selection,
         }
 
     # ── 持久选中（跨页保持，直到切换功能页面）──
@@ -820,25 +842,29 @@ class QuestionListPanel(QWidget):
             self._refresh_table()
 
     def _refresh_table(self):
-        total = len(self.all_questions)
-        total_pages = self._total_pages()
-        if self.current_page >= total_pages:
-            self.current_page = total_pages - 1
-        saved = self._persistent_selected_ids.copy()
-        self._expanded_answers.clear()
-        self.model._selection = saved
-        self.model.load_page(self.all_questions, self.current_page,
-                             total, AppSettings().image_display_mode)
-        # 恢复选中（只恢复当前页中在持久集合里的项）
-        if saved:
-            for r, q in enumerate(self.model._questions):
-                if q["id"] in saved:
-                    self.table.selectRow(r)
-        # 更新UI
-        self._update_pagination(total, total_pages)
-        self._on_selection_changed()
-        # 行高刷新
-        QTimer.singleShot(50, self.table.resizeRowsToContents)
+        self._refreshing_table = True
+        try:
+            total = len(self.all_questions)
+            total_pages = self._total_pages()
+            if self.current_page >= total_pages:
+                self.current_page = total_pages - 1
+            saved = self._persistent_selected_ids.copy()
+            self._expanded_answers.clear()
+            self.model._selection = saved
+            self.model.load_page(self.all_questions, self.current_page,
+                                 total, AppSettings().image_display_mode)
+            # 恢复选中（只恢复当前页中在持久集合里的项）
+            if saved:
+                for r, q in enumerate(self.model._questions):
+                    if q["id"] in saved:
+                        self.table.selectRow(r)
+            # 更新UI
+            self._update_pagination(total, total_pages)
+            self._on_selection_changed()
+            # 行高刷新
+            QTimer.singleShot(50, self.table.resizeRowsToContents)
+        finally:
+            self._refreshing_table = False
 
     def _update_pagination(self, total, total_pages):
         self.stats_label.setText(f"共 {total} 道题目")
@@ -862,9 +888,13 @@ class QuestionListPanel(QWidget):
 
     # ── 选择同步 ──
     def _on_selection_changed(self):
-        """从 Qt 选择模型同步到持久选中的 ID 集合（跨页保持）"""
+        """从 Qt 选择模型同步到持久选中的 ID 集合（跨页保持，刷新期间跳过）"""
         sel_model = self.table.selectionModel()
         model = self.model
+
+        # 刷新期间：model 数据尚未完成切换，禁止修改持久集合
+        if self._refreshing_table:
+            return
 
         # 本页当前被选中的题目 ID
         page_selected = set()
@@ -1007,6 +1037,20 @@ class QuestionListPanel(QWidget):
         super().keyPressEvent(event)
 
     # ── 选择操作 ──
+    def _clear_all_selection(self):
+        """ESC：清除所有选中（包括跨页持久选中）并刷新复选框"""
+        self._persistent_selected_ids.clear()
+        self.model._selection.clear()
+        self.table.clearSelection()
+        total = len(self.all_questions)
+        self.stats_label.setText(f"共 {total} 道题目")
+        # 刷新复选框列
+        m = self.model
+        if m.rowCount() > 0:
+            m.dataChanged.emit(m.index(0, COL_SEL),
+                               m.index(m.rowCount() - 1, COL_SEL),
+                               [Qt.CheckStateRole])
+
     def _handle_select_col(self):
         cur = self.table.currentIndex()
         if cur.isValid():
