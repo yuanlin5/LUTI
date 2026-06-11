@@ -278,7 +278,7 @@ class QuestionDelegate(QStyledItemDelegate):
                     th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
                                          Qt.TextWordWrap, text).height() + 4
                 return QSize(option.rect.width(), max(48, ih + th + 8))
-        # 答案列：展开时计算完整高度（原图大小）
+        # 答案列：与题目列保持一致的图片/文字配置
         if col == COL_ANSWER:
             panel = self._panel
             expanded = panel and index.row() in getattr(panel, '_expanded_answers', set())
@@ -286,19 +286,32 @@ class QuestionDelegate(QStyledItemDelegate):
                 q = index.data(Qt.UserRole)
                 if q:
                     q_imgs, a_imgs = index.data(Qt.UserRole + 1)
-                    ih, iw = 0, 0
+                    ih = 0
                     if a_imgs and os.path.exists(a_imgs[0]["image_path"]):
                         pixmap = QPixmap(a_imgs[0]["image_path"])
-                        iw = pixmap.width()
+                        mode = AppSettings().image_display_mode
+                        col_w = max(50, option.rect.width() - 8)
+                        if mode == "full":
+                            if pixmap.width() > col_w:
+                                pixmap = pixmap.scaledToWidth(col_w, Qt.SmoothTransformation)
+                        else:
+                            pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
+                                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
                         ih = pixmap.height() + 4
                     text = q.get("answer_text", "")
                     th = 0
-                    text_w = max(100, option.rect.width())
                     if text:
                         fm = QFontMetrics(option.font)
-                        th = fm.boundingRect(0, 0, text_w, 0,
+                        th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
                                              Qt.TextWordWrap, text).height() + 4
-                    return QSize(max(200, iw + 8), max(48, ih + th + 8))
+                    return QSize(option.rect.width(), max(48, ih + th + 8))
+        # 默认列：根据文字内容 + 列宽计算自动换行高度
+        text = index.data(Qt.DisplayRole)
+        if text:
+            fm = QFontMetrics(option.font)
+            col_w = max(60, option.rect.width() - 8)
+            h = fm.boundingRect(0, 0, col_w, 0, Qt.TextWordWrap, str(text)).height() + 16
+            return QSize(col_w, max(30, h))
         return super().sizeHint(option, index)
 
     def editorEvent(self, event, model, option, index):
@@ -381,7 +394,13 @@ class QuestionDelegate(QStyledItemDelegate):
             y = rect.y() + 4
             if a_imgs and os.path.exists(a_imgs[0]["image_path"]):
                 pixmap = QPixmap(a_imgs[0]["image_path"])
-                # 原图大小显示，不缩放
+                mode = AppSettings().image_display_mode
+                if mode == "full":
+                    if pixmap.width() > rect.width() - 8:
+                        pixmap = pixmap.scaledToWidth(rect.width() - 8, Qt.SmoothTransformation)
+                else:
+                    pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
+                                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 painter.drawPixmap(rect.x() + 4, y, pixmap)
                 y += pixmap.height() + 4
             if a_text:
