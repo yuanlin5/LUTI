@@ -248,14 +248,43 @@ class QuestionDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         col = index.column()
         if col == COL_STAR:
-            return QSize(40, 44)
+            return QSize(40, 48)
         if col == COL_OPS:
-            return QSize(180, 44)
+            return QSize(180, 48)
+        # 题目/答案列：文本 + 图片高度
+        if col in (COL_QUESTION, COL_ANSWER):
+            q = index.data(Qt.UserRole)
+            if q:
+                q_imgs, a_imgs = index.data(Qt.UserRole + 1)
+                imgs = q_imgs if col == COL_QUESTION else a_imgs
+                ih = 0
+                if imgs and os.path.exists(imgs[0]["image_path"]):
+                    pixmap = QPixmap(imgs[0]["image_path"])
+                    col_w = option.rect.width() - 8
+                    if pixmap.width() > col_w and col_w > 0:
+                        pixmap = pixmap.scaledToWidth(col_w, Qt.SmoothTransformation)
+                    elif self._panel:
+                        mode = AppSettings().image_display_mode
+                        if mode != "full" and pixmap.width() > THUMB_SIZE:
+                            pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
+                                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    ih = pixmap.height() + 4
+                text = q.get("question_text" if col == COL_QUESTION else "answer_text", "")
+                th = 0
+                if text:
+                    fm = QFontMetrics(option.font)
+                    th = fm.boundingRect(0, 0, option.rect.width() - 8, 0,
+                                         Qt.TextWordWrap, text).height() + 4
+                h = max(48, ih + th + 8)
+                return QSize(option.rect.width(), h)
         return super().sizeHint(option, index)
 
     def editorEvent(self, event, model, option, index):
-        """统一事件入口：所有鼠标点击都在这里处理"""
+        """统一事件入口：所有鼠标点击都在这里处理。Ctrl 修饰时不处理交互操作"""
         if event.type() == QEvent.MouseButtonRelease:
+            # Ctrl+单击仅用于选择，不触发交互操作
+            if event.modifiers() & Qt.ControlModifier:
+                return False
             col = index.column()
             if col == COL_STAR:
                 return self._on_star_click(index, model)
@@ -506,6 +535,7 @@ class QuestionListPanel(QWidget):
         self._sort_col = -1
         self._sort_state = 0
         self._original_order = []
+        self._persistent_selected_ids = set()
         self._expanded_answers = set()
         self._dragging = False
         self._auto_scroll_dir = 0
@@ -697,24 +727,29 @@ class QuestionListPanel(QWidget):
     def _setup_columns(self):
         hh = self.table.horizontalHeader()
         fm = QFontMetrics(hh.font())
+        # 固定列宽度（根据表头文字计算 + 最小边距）
+        def _w(text, min_w=60):
+            return max(min_w, fm.width(text) + 24)
         # 固定列
-        for c, w in [(COL_SEL, 60), (COL_IDX, 80), (COL_OPS, 180)]:
+        for c, w in [(COL_SEL, _w(HEADERS[COL_SEL])),
+                     (COL_IDX, _w(HEADERS[COL_IDX], 70)),
+                     (COL_OPS, 180)]:
             self.table.setColumnWidth(c, w)
             hh.setSectionResizeMode(c, QHeaderView.Fixed)
-        # 可拉伸列
+        # 可拉伸列（列宽也能容纳表头文字）
         stretch_cols = [COL_UID, COL_STAR, COL_QUESTION, COL_CAT,
                         COL_TAGS, COL_ANSWER, COL_NOTES, COL_WRONG, COL_DATE]
         for c in stretch_cols:
             hh.setSectionResizeMode(c, QHeaderView.Interactive)
-        self.table.setColumnWidth(COL_UID, 140)
-        self.table.setColumnWidth(COL_STAR, 50)
-        self.table.setColumnWidth(COL_QUESTION, 500)
-        self.table.setColumnWidth(COL_CAT, 100)
-        self.table.setColumnWidth(COL_TAGS, 150)
-        self.table.setColumnWidth(COL_ANSWER, 200)
-        self.table.setColumnWidth(COL_NOTES, 120)
-        self.table.setColumnWidth(COL_WRONG, 60)
-        self.table.setColumnWidth(COL_DATE, 140)
+        self.table.setColumnWidth(COL_UID, _w(HEADERS[COL_UID], 140))
+        self.table.setColumnWidth(COL_STAR, _w(HEADERS[COL_STAR], 50))
+        self.table.setColumnWidth(COL_QUESTION, max(500, _w(HEADERS[COL_QUESTION])))
+        self.table.setColumnWidth(COL_CAT, _w(HEADERS[COL_CAT], 100))
+        self.table.setColumnWidth(COL_TAGS, _w(HEADERS[COL_TAGS], 150))
+        self.table.setColumnWidth(COL_ANSWER, _w(HEADERS[COL_ANSWER], 200))
+        self.table.setColumnWidth(COL_NOTES, _w(HEADERS[COL_NOTES], 100))
+        self.table.setColumnWidth(COL_WRONG, _w(HEADERS[COL_WRONG], 60))
+        self.table.setColumnWidth(COL_DATE, _w(HEADERS[COL_DATE], 140))
         # 题目列自动拉伸
         hh.setStretchLastSection(False)
         hh.setSectionResizeMode(COL_QUESTION, QHeaderView.Stretch)
@@ -735,10 +770,14 @@ class QuestionListPanel(QWidget):
             "clear_selection": lambda: self.table.clearSelection(),
         }
 
-    # ── 属性 ──
+    # ── 持久选中（跨页保持，直到切换功能页面）──
     @property
     def _selected_ids(self):
-        return self.model.selected_ids()
+        return self._persistent_selected_ids
+
+    @_selected_ids.setter
+    def _selected_ids(self, value):
+        self._persistent_selected_ids = value
 
     # ── 搜索与数据 ──
     def _total_pages(self):
@@ -785,12 +824,12 @@ class QuestionListPanel(QWidget):
         total_pages = self._total_pages()
         if self.current_page >= total_pages:
             self.current_page = total_pages - 1
-        saved = self._selected_ids.copy()
-        self.model._selection = saved
+        saved = self._persistent_selected_ids.copy()
         self._expanded_answers.clear()
+        self.model._selection = saved
         self.model.load_page(self.all_questions, self.current_page,
                              total, AppSettings().image_display_mode)
-        # 恢复选中
+        # 恢复选中（只恢复当前页中在持久集合里的项）
         if saved:
             for r, q in enumerate(self.model._questions):
                 if q["id"] in saved:
@@ -798,6 +837,8 @@ class QuestionListPanel(QWidget):
         # 更新UI
         self._update_pagination(total, total_pages)
         self._on_selection_changed()
+        # 行高刷新
+        QTimer.singleShot(50, self.table.resizeRowsToContents)
 
     def _update_pagination(self, total, total_pages):
         self.stats_label.setText(f"共 {total} 道题目")
@@ -821,10 +862,12 @@ class QuestionListPanel(QWidget):
 
     # ── 选择同步 ──
     def _on_selection_changed(self):
-        # 从 Qt 选择模型同步到 model._selection
+        """从 Qt 选择模型同步到持久选中的 ID 集合（跨页保持）"""
         sel_model = self.table.selectionModel()
         model = self.model
-        new_ids = set()
+
+        # 本页当前被选中的题目 ID
+        page_selected = set()
         rows_seen = set()
         for idx in sel_model.selectedIndexes():
             r = idx.row()
@@ -832,11 +875,20 @@ class QuestionListPanel(QWidget):
                 rows_seen.add(r)
                 q = model.question_at_row(r)
                 if q:
-                    new_ids.add(q["id"])
-        model._selection = new_ids
+                    page_selected.add(q["id"])
 
-        # 更新标签
-        count = len(new_ids)
+        # 本页所有题目 ID
+        page_ids = {q["id"] for q in model._questions}
+
+        # 用本页的选择覆盖持久集合中的对应部分
+        self._persistent_selected_ids.difference_update(page_ids)
+        self._persistent_selected_ids.update(page_selected)
+
+        # 同步 model._selection 供 CheckStateRole 使用
+        model._selection = self._persistent_selected_ids
+
+        # 更新标签（显示持久选中总数）
+        count = len(self._persistent_selected_ids)
         total = len(self.all_questions)
         if count:
             self.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
@@ -848,9 +900,10 @@ class QuestionListPanel(QWidget):
         self.table.horizontalHeader().viewport().update()
 
         # 通知 model 刷新复选框列
-        top = model.index(0, COL_SEL)
-        bot = model.index(model.rowCount() - 1, COL_SEL)
-        model.dataChanged.emit(top, bot, [Qt.CheckStateRole])
+        if model.rowCount() > 0:
+            top = model.index(0, COL_SEL)
+            bot = model.index(model.rowCount() - 1, COL_SEL)
+            model.dataChanged.emit(top, bot, [Qt.CheckStateRole])
 
     def _on_star_toggled(self, qid):
         self.model.toggle_star(qid)
@@ -1069,18 +1122,6 @@ class QuestionListPanel(QWidget):
             if event.type() == QEvent.MouseButtonRelease:
                 self._auto_scroll_timer.stop()
                 self._dragging = False
-            elif event.type() == QEvent.MouseButtonPress:
-                if event.modifiers() & Qt.ControlModifier:
-                    # Ctrl+单击：手动切换选择（统一处理，不再区分 widget/item）
-                    pos = event.pos()
-                    idx = self.table.indexAt(pos)
-                    if idx.isValid():
-                        sel = self.table.selectionModel()
-                        if sel.isSelected(idx):
-                            sel.select(idx, sel.Deselect)
-                        else:
-                            sel.select(idx, sel.Select)
-                        return True
             elif event.type() == QEvent.Wheel:
                 if event.modifiers() & Qt.ShiftModifier:
                     bar = self.table.horizontalScrollBar()
@@ -1473,6 +1514,7 @@ class QuestionListPanel(QWidget):
 
     # ── 生命周期 ──
     def on_shown(self):
+        self._persistent_selected_ids.clear()
         self._refresh_filters()
         self._do_search()
         QTimer.singleShot(100, self.table.resizeRowsToContents)
