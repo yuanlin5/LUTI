@@ -161,23 +161,6 @@ class QuestionListPanel(QWidget):
         self._sort_state = 0      # 0=原序, 1=升序, 2=降序
         self._original_order = [] # 保存初始顺序用于恢复
 
-    @property
-    def _selected_ids(self):
-        """计算属性：从 Qt 选择模型中动态获取被选中题目 ID 集合"""
-        result = set()
-        sel_model = self.table.selectionModel()
-        if sel_model is None:
-            return result
-        rows_seen = set()
-        for idx in sel_model.selectedIndexes():
-            r = idx.row()
-            if r not in rows_seen:
-                rows_seen.add(r)
-                q = self._get_question_at_row(r)
-                if q:
-                    result.add(q["id"])
-        return result
-
         self.table = QTableWidget()
         self.table.setColumnCount(self._col_count)
         self._all_headers = ["序号", "初始编号", "星标", "题目", "分类",
@@ -292,6 +275,23 @@ class QuestionListPanel(QWidget):
         page_layout.addWidget(self.next_btn)
 
         layout.addWidget(page_frame)
+
+    @property
+    def _selected_ids(self):
+        """计算属性：从 Qt 选择模型中动态获取被选中题目 ID 集合"""
+        result = set()
+        sel_model = self.table.selectionModel()
+        if sel_model is None:
+            return result
+        rows_seen = set()
+        for idx in sel_model.selectedIndexes():
+            r = idx.row()
+            if r not in rows_seen:
+                rows_seen.add(r)
+                q = self._get_question_at_row(r)
+                if q:
+                    result.add(q["id"])
+        return result
 
     def _total_pages(self):
         """根据当前题目总数和 PAGE_SIZE 计算总页数（至少1页）"""

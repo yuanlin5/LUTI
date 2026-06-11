@@ -299,7 +299,10 @@ class MainWindow(MSFluentWindow):
         self._apply_stylesheet()
         self.add_question_panel.update_input_heights()
         self.add_question_panel.update_dynamic_styles()
-        self.exam_panel.update_dynamic_styles()
+        try:
+            self.exam_panel.update_dynamic_styles()
+        except Exception:
+            pass
         self.question_list_panel.update_dynamic_styles()
 
     def _on_input_lines_changed(self):
