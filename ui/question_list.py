@@ -34,6 +34,33 @@ THUMB_SIZE = 50
 FULL_IMAGE_WIDTH = 300
 
 
+class _HighlightHeader(QHeaderView):
+    """支持选中高亮的自定义表头：检查对应行/列是否有选中单元格来决定背景色"""
+    _table_ref = None
+
+    def paintSection(self, painter, rect, logicalIndex):
+        if self._table_ref is not None:
+            sel = self._table_ref.selectionModel()
+            highlighted = False
+            if self.orientation() == Qt.Vertical:
+                # 纵向表头：检查该行是否有被选中的单元格
+                for c in range(self._table_ref.columnCount()):
+                    if sel.isSelected(
+                            self._table_ref.model().index(logicalIndex, c)):
+                        highlighted = True
+                        break
+            else:
+                # 横向表头：检查该列是否有被选中的单元格
+                for r in range(self._table_ref.rowCount()):
+                    if sel.isSelected(
+                            self._table_ref.model().index(r, logicalIndex)):
+                        highlighted = True
+                        break
+            if highlighted:
+                painter.fillRect(rect, QColor("#D2E3FC"))
+        super().paintSection(painter, rect, logicalIndex)
+
+
 class QuestionListPanel(QWidget):
     """题库管理面板：表格视图 + 搜索筛选 + 分页 + CRUD 操作"""
 
@@ -162,6 +189,10 @@ class QuestionListPanel(QWidget):
         self._original_order = [] # 保存初始顺序用于恢复
 
         self.table = QTableWidget()
+        self.table.setVerticalHeader(_HighlightHeader(Qt.Vertical))
+        self.table.setHorizontalHeader(_HighlightHeader(Qt.Horizontal))
+        self.table.verticalHeader()._table_ref = self.table
+        self.table.horizontalHeader()._table_ref = self.table
         self.table.setColumnCount(self._col_count)
         self._all_headers = ["序号", "初始编号", "星标", "题目", "分类",
                              "标签", "答案", "备注", "错次", "最近修改", "操作"]
@@ -719,32 +750,23 @@ class QuestionListPanel(QWidget):
             self.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
         else:
             self.stats_label.setText(f"共 {total} 道题目")
-        self._highlight_headers()
-
-    def _highlight_headers(self):
-        """高亮有选中单元格的行号和列标（浅蓝背景）"""
-        sel_model = self.table.selectionModel()
-        selected_rows = set()
-        selected_cols = set()
-        for idx in sel_model.selectedIndexes():
-            selected_rows.add(idx.row())
-            selected_cols.add(idx.column())
-        hl = QColor("#D2E3FC")
-        df = QColor(255, 255, 255)
-        vh = self.table.verticalHeader()
-        for r in range(self.table.rowCount()):
-            vh.model().setData(vh.model().index(r, 0),
-                               hl if r in selected_rows else df,
-                               Qt.BackgroundRole)
-        hh = self.table.horizontalHeader()
-        for c in range(self._col_count):
-            hh.model().setData(hh.model().index(c, 0),
-                               hl if c in selected_cols else df,
-                               Qt.BackgroundRole)
+        self.table.verticalHeader().viewport().update()
+        self.table.horizontalHeader().viewport().update()
 
     def _on_cell_pressed(self, row, col):
-        """鼠标按下 → 记录起始行号（供 eventFilter 拖拽检测使用）"""
+        """鼠标按下 → 记录起始行号；Ctrl+单击 widget 单元格时手动切换选择"""
         self._drag_start_row = row
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers & Qt.ControlModifier:
+            # widget 单元格（星标/标签/答案等）点击被 widget 消费，Qt 不会处理选择
+            # 只有 widget 单元格需要手动切换；QTableWidgetItem 单元格由 Qt ExtendedSelection 原生处理
+            if self.table.cellWidget(row, col) is not None:
+                idx = self.table.model().index(row, col)
+                sel = self.table.selectionModel()
+                if sel.isSelected(idx):
+                    sel.select(idx, sel.Deselect)
+                else:
+                    sel.select(idx, sel.Select)
 
     def _toggle_star(self, qid, btn):
         """切换星标状态"""
@@ -1080,20 +1102,6 @@ class QuestionListPanel(QWidget):
             if event.type() == QEvent.MouseButtonRelease:
                 self._auto_scroll_timer.stop()
                 self._dragging = False
-            elif event.type() == QEvent.MouseButtonPress:
-                if event.modifiers() & Qt.ControlModifier:
-                    # Ctrl+单击：手动切换该单元格选中状态，解决 widget 列无法参与 Ctrl+多选的 bug
-                    pos = event.pos()
-                    row = self.table.rowAt(pos.y())
-                    col = self.table.columnAt(pos.x())
-                    if row >= 0 and col >= 0:
-                        idx = self.table.model().index(row, col)
-                        sel = self.table.selectionModel()
-                        if sel.isSelected(idx):
-                            sel.select(idx, sel.Deselect)
-                        else:
-                            sel.select(idx, sel.Select)
-                        return True
             elif event.type() == QEvent.Wheel:
                 if event.modifiers() & Qt.ShiftModifier:
                     bar = self.table.horizontalScrollBar()
