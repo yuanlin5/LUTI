@@ -1,29 +1,24 @@
 """
-题库管理面板 - QTableView + QAbstractTableModel + QStyledItemDelegate 重构版
+题库管理面板 — QWebEngineView + Tabulator.js 重构版
 
-MVP 架构分离：
-- QuestionTableModel    → 纯数据层 (all_questions → Qt roles)
-- QuestionDelegate      → 渲染+交互层 (paint + editorEvent 统一处理点击)
-- QuestionListPanel     → 视图层 (QTableView + 搜索/筛选/分页/快捷键/批量操作)
+JavaScript 表格库通过 QWebChannel 与 Python 后端通信。
+Python 负责：数据库操作、UI 控件（搜索/筛选/翻页/批量操作）
+JS 负责：表格渲染、选择、排序、交互
 """
 import os
+import json
 import subprocess
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QTableView, QHeaderView, QAbstractItemView, QFrame,
-    QMessageBox, QMenu, QStyle,
-    QFileDialog, QProgressDialog, QApplication, QInputDialog,
+    QMessageBox, QMenu, QFrame, QApplication,
+    QFileDialog, QProgressDialog, QInputDialog,
     QDialog, QCheckBox, QDialogButtonBox, QColorDialog,
-    QStyledItemDelegate, QStyleOptionButton, QStyleOptionViewItem,
 )
 from PyQt5.QtCore import (
-    Qt, pyqtSignal, QTimer, QEvent, QItemSelection,
-    QAbstractTableModel, QModelIndex, QRect, QSize,
+    Qt, pyqtSignal, QTimer, QUrl, QObject, pyqtSlot, pyqtProperty,
 )
-from PyQt5.QtGui import (
-    QPixmap, QIcon, QFontMetrics, QKeySequence, QColor,
-    QPainter, QPen, QFont, QPalette,
-)
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWebChannel import QWebChannel
 from qfluentwidgets import (
     PrimaryPushButton, PushButton, ComboBox, LineEdit, CardWidget,
 )
@@ -32,544 +27,77 @@ from config import AppSettings
 from services.export_service import export_questions
 
 PAGE_SIZE = 20
-THUMB_SIZE = 50
-
-# 列索引常量（方便引用）
-# 列索引（选中状态移到最后）
-COL_IDX, COL_UID, COL_STAR, COL_QUESTION, COL_CAT = range(5)
-COL_TAGS, COL_ANSWER, COL_NOTES, COL_WRONG, COL_DATE, COL_SEL, COL_OPS = range(5, 12)
-COL_COUNT = 12
-
-HEADERS = ["序号", "初始编号", "星标", "题目", "分类",
-           "标签", "答案", "备注", "错次", "最近修改", "选中状态", "操作"]
-# 可排序列（索引 → key 函数）
-SORT_KEYS = {
-    COL_UID:      lambda q: q.get("uid", ""),
-    COL_STAR:     lambda q: q.get("starred", 0),
-    COL_QUESTION: lambda q: q.get("question_text", ""),
-    COL_CAT:      lambda q: q.get("category_id") or 0,
-    COL_TAGS:     lambda q: q.get("_tags_str", ""),
-    COL_ANSWER:   lambda q: q.get("answer_text", ""),
-    COL_NOTES:    lambda q: q.get("notes", ""),
-    COL_WRONG:    lambda q: q.get("wrong_count", 0),
-    COL_DATE:     lambda q: q.get("updated_at", ""),
-}
 
 
 # ============================================================================
-# Model — 纯数据层
+# Bridge — Python ↔ JavaScript 通信桥梁
 # ============================================================================
-class QuestionTableModel(QAbstractTableModel):
-    """将 self.all_questions 暴露为 Qt 表格模型"""
+class QuestionTableBridge(QObject):
+    """暴露给 JavaScript 的 Python API"""
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._questions = []       # 当前页的题目列表
-        self._base_index = 0       # 起始全局索引
-        self._total_count = 0      # 全部题目数
-        self._selection = set()    # 被选中的题目 ID 集合
-        self._image_mode = "thumb"
-        self._images_cache = {}    # qid → (q_images, a_images)
+    def __init__(self, panel):
+        super().__init__()
+        self._panel = panel
 
-    # ── 必须实现 ──
-    def rowCount(self, parent=QModelIndex()):
-        return len(self._questions)
-
-    def columnCount(self, parent=QModelIndex()):
-        return COL_COUNT
-
-    def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid():
-            return None
-        r, c = index.row(), index.column()
-        if r >= len(self._questions):
-            return None
-        q = self._questions[r]
-
-        if role == Qt.DisplayRole:
-            return self._display_data(q, c, r)
-        if role == Qt.TextAlignmentRole:
-            return self._alignment(c)
-        if role == Qt.CheckStateRole and c == COL_SEL:
-            return Qt.Checked if q["id"] in self._selection else Qt.Unchecked
-        if role == Qt.ForegroundRole and c == COL_WRONG:
-            if q.get("wrong_count", 0) > 0:
-                return QColor(255, 0, 0)
-        if role == Qt.UserRole:
-            return q
-        if role == Qt.UserRole + 1:
-            return self._images_cache.get(q["id"], ([], []))
-        return None
-
-    def _display_data(self, q, col, row):
-        if col == COL_IDX:
-            return str(self._base_index + row + 1)
-        if col == COL_UID:
-            return q.get("uid", "") or "-"
-        if col == COL_QUESTION:
-            return q.get("question_text", "")
-        if col == COL_CAT:
-            return self._cat_name(q.get("category_id"))
-        if col == COL_ANSWER:
-            return q.get("answer_text", "")
-        if col == COL_NOTES:
-            return q.get("notes", "")
-        if col == COL_WRONG:
-            return str(q.get("wrong_count", 0))
-        if col == COL_DATE:
-            u = q.get("updated_at", "")
-            if u and len(u) > 16:
-                return u[:10].replace("-", "/") + " " + u[11:19]
-            return u or "-"
-        if col == COL_SEL:
-            return ""
-        return ""
-
-    def _alignment(self, col):
-        if col in (COL_SEL, COL_IDX, COL_UID, COL_WRONG, COL_DATE):
-            return Qt.AlignCenter
-        return Qt.AlignLeft | Qt.AlignVCenter
-
-    def _cat_name(self, cat_id):
-        if not cat_id:
-            return ""
-        if not hasattr(self, '_cat_map'):
-            self._cat_map = {}
-            for c in models.get_all_categories():
-                self._cat_map[c["id"]] = c["name"]
-        return self._cat_map.get(cat_id, "")
-
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            if 0 <= section < len(HEADERS):
-                return HEADERS[section]
-        return None
-
-    def flags(self, index):
-        f = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if index.column() == COL_SEL:
-            f |= Qt.ItemIsUserCheckable
-        return f
-
-    def setData(self, index, value, role=Qt.EditRole):
-        if role == Qt.CheckStateRole and index.column() == COL_SEL:
-            q = self._questions[index.row()]
-            if value == Qt.Checked:
-                self._selection.add(q["id"])
-            else:
-                self._selection.discard(q["id"])
-            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
-            return True
-        return False
-
-    # ── 公开 API ──
-    def selected_ids(self):
-        return self._selection.copy()
-
-    def load_page(self, all_questions, page, total, image_mode):
-        """加载一页数据，返回被选中 ID 集合"""
-        self.beginResetModel()
-        self._image_mode = image_mode
-        self._total_count = total
-        self._base_index = page * PAGE_SIZE
-        start = self._base_index
-        end = min(start + PAGE_SIZE, len(all_questions))
-        self._questions = all_questions[start:end]
-        # 预加载图片信息
-        self._images_cache.clear()
-        for q in self._questions:
-            imgs = models.get_question_images(q["id"])
-            q_imgs = [i for i in imgs if i["image_type"] == "question"]
-            a_imgs = [i for i in imgs if i["image_type"] == "answer"]
-            self._images_cache[q["id"]] = (q_imgs, a_imgs)
-        # 定期刷新分类名映射
-        if not hasattr(self, '_cat_map'):
-            self._cat_map = {}
-            for c in models.get_all_categories():
-                self._cat_map[c["id"]] = c["name"]
-        self.endResetModel()
-        return self._selection.copy()
-
-    def question_at_row(self, row):
-        if 0 <= row < len(self._questions):
-            return self._questions[row]
-        return None
-
-    def get_question_row(self, qid):
-        for r, q in enumerate(self._questions):
-            if q["id"] == qid:
-                return r
-        return -1
-
+    @pyqtSlot(str, result=str)
     def toggle_star(self, qid):
-        """切换星标，返回新状态"""
-        new_val = models.toggle_star(qid)
-        for i, q in enumerate(self._questions):
-            if q["id"] == qid:
+        """切换星标 → 返回新状态 JSON"""
+        new_val = models.toggle_star(int(qid))
+        for q in self._panel.all_questions:
+            if q["id"] == int(qid):
                 q["starred"] = new_val
-                idx = self.index(i, COL_STAR)
-                self.dataChanged.emit(idx, idx)
                 break
-        return new_val
+        return json.dumps({"starred": new_val})
 
-    def updated(self):
-        """通知视图全部数据已刷新"""
-        self._cat_map = {}
-        for c in models.get_all_categories():
-            self._cat_map[c["id"]] = c["name"]
-        if self._questions:
-            self.dataChanged.emit(
-                self.index(0, 0),
-                self.index(len(self._questions) - 1, COL_COUNT - 1))
+    @pyqtSlot(str)
+    def edit_question(self, qid):
+        """编辑题目"""
+        self._panel.edit_requested.emit(int(qid))
 
+    @pyqtSlot(str)
+    def delete_question(self, qid):
+        """删除题目"""
+        self._panel._delete_question(int(qid))
 
-# ============================================================================
-# Delegate — 渲染 + 交互层（统一所有单元格事件，消除 widget vs item 差异）
-# ============================================================================
-class QuestionDelegate(QStyledItemDelegate):
-    """绘制星标、标签芯片、答案区、操作按钮，并通过 editorEvent 处理点击"""
+    @pyqtSlot(str)
+    def edit_tag(self, tag_id):
+        """编辑标签"""
+        self._panel._safe_edit_tag(int(tag_id))
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._panel = None  # 回引 QuestionListPanel
+    @pyqtSlot(str, int, int)
+    def row_context(self, qid, x, y):
+        """右键菜单（由 Python 弹出）"""
+        qid = int(qid)
+        q = next((q for q in self._panel.all_questions if q["id"] == qid), None)
+        if q is None:
+            return
+        self._panel._show_row_context(q)
 
-    def paint(self, painter, option, index):
-        col = index.column()
-        if col == COL_STAR:
-            self._paint_star(painter, option, index)
-        elif col == COL_TAGS:
-            self._paint_tags(painter, option, index)
-        elif col == COL_ANSWER:
-            self._paint_answer(painter, option, index)
-        elif col == COL_OPS:
-            self._paint_ops(painter, option, index)
-        elif col == COL_QUESTION:
-            self._paint_question(painter, option, index)
+    @pyqtSlot(str)
+    def selection_changed(self, ids_json):
+        """JS 选择变化时同步"""
+        ids = json.loads(ids_json)
+        self._panel._persistent_selected_ids = set(ids)
+        count = len(ids)
+        total = len(self._panel.all_questions)
+        if count:
+            self._panel.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
         else:
-            # 强制自动换行：不省略，设置 WrapText 特性
-            opt = QStyleOptionViewItem(option)
-            opt.features |= QStyleOptionViewItem.WrapText
-            opt.textElideMode = Qt.ElideNone
-            super().paint(painter, opt, index)
+            self._panel.stats_label.setText(f"共 {total} 道题目")
 
-    def sizeHint(self, option, index):
-        col = index.column()
-        if col == COL_STAR:
-            return QSize(40, 48)
-        if col == COL_OPS:
-            return QSize(180, 48)
-        # 题目列：文本 + 图片高度
-        if col == COL_QUESTION:
-            q = index.data(Qt.UserRole)
-            if q:
-                q_imgs, a_imgs = index.data(Qt.UserRole + 1)
-                ih = 0
-                if q_imgs and os.path.exists(q_imgs[0]["image_path"]):
-                    pixmap = QPixmap(q_imgs[0]["image_path"])
-                    col_w = max(50, option.rect.width() - 8)
-                    mode = AppSettings().image_display_mode
-                    if mode == "full":
-                        if pixmap.width() > col_w:
-                            pixmap = pixmap.scaledToWidth(col_w, Qt.SmoothTransformation)
-                    else:
-                        pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
-                                               Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    ih = pixmap.height() + 4
-                text = q.get("question_text", "")
-                th = 0
-                if text:
-                    fm = QFontMetrics(option.font)
-                    th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
-                                         Qt.TextWordWrap, text).height() + 4
-                return QSize(option.rect.width(), max(48, ih + th + 8))
-        # 答案列：与题目列保持一致的图片/文字配置
-        if col == COL_ANSWER:
-            panel = self._panel
-            expanded = panel and index.row() in getattr(panel, '_expanded_answers', set())
-            if expanded:
-                q = index.data(Qt.UserRole)
-                if q:
-                    q_imgs, a_imgs = index.data(Qt.UserRole + 1)
-                    ih = 0
-                    if a_imgs and os.path.exists(a_imgs[0]["image_path"]):
-                        pixmap = QPixmap(a_imgs[0]["image_path"])
-                        mode = AppSettings().image_display_mode
-                        col_w = max(50, option.rect.width() - 8)
-                        if mode == "full":
-                            if pixmap.width() > col_w:
-                                pixmap = pixmap.scaledToWidth(col_w, Qt.SmoothTransformation)
-                        else:
-                            pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
-                                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        ih = pixmap.height() + 4
-                    text = q.get("answer_text", "")
-                    th = 0
-                    if text:
-                        fm = QFontMetrics(option.font)
-                        th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
-                                             Qt.TextWordWrap, text).height() + 4
-                    return QSize(option.rect.width(), max(48, ih + th + 8))
-        # 默认列：用列实际宽度计算换行高度
-        text = index.data(Qt.DisplayRole)
-        if text and self._panel:
-            col_w = self._panel.table.columnWidth(col) - 8
-            if col_w > 20:
-                fm = QFontMetrics(option.font)
-                h = fm.boundingRect(0, 0, col_w, 0, Qt.TextWordWrap, str(text)).height() + 16
-                return QSize(col_w, max(30, h))
-        return super().sizeHint(option, index)
-
-    def editorEvent(self, event, model, option, index):
-        """统一事件入口：所有鼠标点击都在这里处理。Ctrl 修饰时不处理交互操作"""
-        if event.type() == QEvent.MouseButtonRelease:
-            # Ctrl+单击仅用于选择，不触发交互操作
-            if event.modifiers() & Qt.ControlModifier:
-                return False
-            col = index.column()
-            if col == COL_STAR:
-                return self._on_star_click(index, model)
-            elif col == COL_ANSWER:
-                return self._on_answer_click(index, model)
-            elif col == COL_TAGS:
-                return self._on_tags_click(event, option, index, model)
-            elif col == COL_OPS:
-                return self._on_ops_click(event, option, index, model)
-        return super().editorEvent(event, model, option, index)
-
-    # ── 绘制 ──
-    def _paint_star(self, painter, option, index):
-        q = index.data(Qt.UserRole)
-        if not q:
-            return
-        is_starred = bool(q.get("starred", 0))
-        painter.save()
-        rect = option.rect
-        cx, cy = rect.center().x(), rect.center().y()
-        r = 18
-        if is_starred:
-            painter.setPen(QPen(QColor("#F5A623"), 1))
-            painter.setBrush(QColor("#FFF8E1"))
-        else:
-            painter.setPen(QPen(QColor("#DDD"), 1))
-            painter.setBrush(QColor("#FAFAFA"))
-        painter.drawEllipse(int(cx - r), int(cy - r), 2 * r, 2 * r)
-        painter.setPen(QColor("#F5A623") if is_starred else QColor("#BBB"))
-        f = QFont()
-        f.setPointSize(16)
-        painter.setFont(f)
-        painter.drawText(QRect(int(cx - r), int(cy - r), 2 * r, 2 * r),
-                         Qt.AlignCenter, "★" if is_starred else "☆")
-        painter.restore()
-
-    def _paint_tags(self, painter, option, index):
-        q = index.data(Qt.UserRole)
-        if not q:
-            return
-        tags = models.get_question_tags(q["id"])
-        painter.save()
-        x, y = option.rect.x() + 4, option.rect.y() + 4
-        for t in tags:
-            text = t["name"]
-            color = QColor(t.get("color", "#4A90D9"))
-            fm = QFontMetrics(option.font)
-            tw = fm.width(text) + 20
-            chip_rect = QRect(x, y, tw, 22)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(color)
-            painter.drawRoundedRect(chip_rect, 10, 10)
-            painter.setPen(QColor("#FFFFFF"))
-            painter.setFont(option.font)
-            painter.drawText(chip_rect, Qt.AlignCenter, text)
-            x += tw + 4
-            if x > option.rect.right():
-                break
-        painter.restore()
-
-    def _paint_answer(self, painter, option, index):
-        q = index.data(Qt.UserRole)
-        if not q:
-            return
-        panel = self._panel
-        show = panel and index.row() in getattr(panel, '_expanded_answers', set())
-        if show:
-            q_imgs, a_imgs = index.data(Qt.UserRole + 1)
-            a_text = q.get("answer_text", "")
-            painter.save()
-            rect = option.rect
-            y = rect.y() + 4
-            if a_imgs and os.path.exists(a_imgs[0]["image_path"]):
-                pixmap = QPixmap(a_imgs[0]["image_path"])
-                mode = AppSettings().image_display_mode
-                if mode == "full":
-                    if pixmap.width() > rect.width() - 8:
-                        pixmap = pixmap.scaledToWidth(rect.width() - 8, Qt.SmoothTransformation)
-                else:
-                    pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
-                                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                painter.drawPixmap(rect.x() + 4, y, pixmap)
-                y += pixmap.height() + 4
-            if a_text:
-                painter.setPen(Qt.black)
-                painter.setFont(option.font)
-                text_rect = QRect(rect.x() + 4, y, rect.width() - 8, rect.height() - (y - rect.y()))
-                painter.drawText(text_rect, Qt.AlignLeft | Qt.TextWordWrap, a_text)
-            painter.restore()
-        else:
-            painter.save()
-            painter.setPen(QColor("#666"))
-            btn_rect = option.rect.adjusted(10, 8, -10, -8)
-            painter.setBrush(QColor("#D0D0D0"))
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(btn_rect, 4, 4)
-            painter.setPen(QColor("#666"))
-            painter.drawText(btn_rect, Qt.AlignCenter, "点击查看答案")
-            painter.restore()
-
-    def _paint_ops(self, painter, option, index):
-        painter.save()
-        rect = option.rect
-        # 编辑按钮
-        edit_rect = QRect(rect.x() + 4, rect.y() + 6, 50, 30)
-        painter.setBrush(QColor("#E8E8E8"))
-        painter.setPen(QPen(QColor("#CCC"), 1))
-        painter.drawRoundedRect(edit_rect, 4, 4)
-        painter.setPen(QColor("#333"))
-        painter.drawText(edit_rect, Qt.AlignCenter, "编辑")
-        # 删除按钮
-        del_rect = QRect(rect.x() + 60, rect.y() + 6, 50, 30)
-        painter.setBrush(QColor("#FFE8E8"))
-        painter.setPen(QPen(QColor("#FFB0B0"), 1))
-        painter.drawRoundedRect(del_rect, 4, 4)
-        painter.setPen(QColor("#C00"))
-        painter.drawText(del_rect, Qt.AlignCenter, "删除")
-        painter.restore()
-
-    def _paint_question(self, painter, option, index):
-        q = index.data(Qt.UserRole)
-        if not q:
-            super().paint(painter, option, index)
-            return
-        q_imgs, a_imgs = index.data(Qt.UserRole + 1)
-        mode = AppSettings().image_display_mode
-        painter.save()
-        rect = option.rect
-        y = rect.y() + 4
-        if q_imgs and os.path.exists(q_imgs[0]["image_path"]):
-            pixmap = QPixmap(q_imgs[0]["image_path"])
-            if mode == "full":
-                if pixmap.width() > rect.width() - 8:
-                    pixmap = pixmap.scaledToWidth(rect.width() - 8, Qt.SmoothTransformation)
-            else:
-                pixmap = pixmap.scaled(THUMB_SIZE, THUMB_SIZE,
-                                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            painter.drawPixmap(rect.x() + 4, y, pixmap)
-            y += pixmap.height() + 4
-        text = q.get("question_text", "")
-        if text:
-            painter.setPen(Qt.black)
-            painter.setFont(option.font)
-            text_rect = QRect(rect.x() + 4, y, rect.width() - 8, rect.height() - (y - rect.y()))
-            painter.drawText(text_rect, Qt.AlignLeft | Qt.TextWordWrap, text)
-        painter.restore()
-
-    # ── 交互 ──
-    def _on_star_click(self, index, model):
-        q = index.data(Qt.UserRole)
-        if q and self._panel:
-            self._panel._on_star_toggled(q["id"])
-            return True
-        return False
-
-    def _on_answer_click(self, index, model):
-        if self._panel:
-            row = index.row()
-            expanded = getattr(self._panel, '_expanded_answers', set())
-            if row in expanded:
-                expanded.discard(row)
-            else:
-                expanded.add(row)
-            self._panel._expanded_answers = expanded
-            # 触发重绘 → 新 sizeHint → 延迟调高度
-            model.dataChanged.emit(
-                model.index(row, 0), model.index(row, COL_COUNT - 1))
-            QTimer.singleShot(10, lambda r=row: self._panel._update_row_height(r))
-            return True
-        return False
-
-    def _on_tags_click(self, event, option, index, model):
-        q = index.data(Qt.UserRole)
-        if not q or not self._panel:
-            return False
-        tags = models.get_question_tags(q["id"])
-        pos = event.pos()
-        x = 4
-        opt_rect = option.rect
-        for t in tags:
-            text = t["name"]
-            tw = QFontMetrics(QFont()).width(text) + 20
-            chip_rect = QRect(opt_rect.x() + x, opt_rect.y() + 4, tw, 22)
-            if chip_rect.contains(pos):
-                self._panel._safe_edit_tag(t["id"])
-                return True
-            x += tw + 4
-        return False
-
-    def _on_ops_click(self, event, option, index, model):
-        q = index.data(Qt.UserRole)
-        if not q or not self._panel:
-            return False
-        pos = event.pos()
-        rect = option.rect
-        edit_rect = QRect(rect.x() + 4, rect.y() + 6, 50, 30)
-        del_rect = QRect(rect.x() + 60, rect.y() + 6, 50, 30)
-        if edit_rect.contains(pos):
-            self._panel.edit_requested.emit(q["id"])
-            return True
-        if del_rect.contains(pos):
-            self._panel._delete_question(q["id"])
-            return True
-        return False
-
-
-# ============================================================================
-# HighlightHeader — 支持选中高亮的表头
-# ============================================================================
-class HighlightHeader(QHeaderView):
-    """选中单元格所在行/列的表头半透明蓝色高亮"""
-    _table_ref = None
-
-    def paintSection(self, painter, rect, logicalIndex):
-        super().paintSection(painter, rect, logicalIndex)
-        if self._table_ref is None:
-            return
-        sel = self._table_ref.selectionModel()
-        if sel is None:
-            return
-        highlighted = False
-        if self.orientation() == Qt.Vertical:
-            model = self._table_ref.model()
-            for c in range(model.columnCount()):
-                if sel.isSelected(model.index(logicalIndex, c)):
-                    highlighted = True
-                    break
-        else:
-            model = self._table_ref.model()
-            for r in range(model.rowCount()):
-                if sel.isSelected(model.index(r, logicalIndex)):
-                    highlighted = True
-                    break
-        if highlighted:
-            painter.save()
-            painter.setOpacity(0.35)
-            painter.fillRect(rect, QColor("#4A90D9"))
-            painter.restore()
+    @pyqtSlot()
+    def selection_cleared(self):
+        """ESC 清除所有选中"""
+        self._panel._persistent_selected_ids.clear()
+        total = len(self._panel.all_questions)
+        self._panel.stats_label.setText(f"共 {total} 道题目")
 
 
 # ============================================================================
 # QuestionListPanel — 主面板
 # ============================================================================
 class QuestionListPanel(QWidget):
-    """题库管理面板：QTableView + MVC + 搜索筛选 + 分页 + 快捷键"""
+    """题库管理面板：QWebEngineView + JavaScript 表格 + Python 控件"""
 
     edit_requested = pyqtSignal(int)
 
@@ -581,13 +109,9 @@ class QuestionListPanel(QWidget):
         self._sort_state = 0
         self._original_order = []
         self._persistent_selected_ids = set()
-        self._refreshing_table = False
         self._expanded_answers = set()
-        self._dragging = False
-        self._auto_scroll_dir = 0
-        self._shortcut_actions = {}
         self._setup_ui()
-        self._setup_shortcuts()
+        self._setup_bridge()
 
     # ── UI 构建 ──
     def _setup_ui(self):
@@ -599,7 +123,7 @@ class QuestionListPanel(QWidget):
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
-        # 搜索/筛选栏
+        # 搜索/筛选栏（保持不变）
         filter_frame = CardWidget()
         filter_frame.setObjectName("card")
         fl = QHBoxLayout(filter_frame)
@@ -664,87 +188,16 @@ class QuestionListPanel(QWidget):
 
         # 统计栏
         top_bar = QHBoxLayout()
-        self.col_filter_btn = PushButton("列表筛选器 ▾")
-        self.col_filter_btn.setObjectName("smallBtn")
-        self.col_filter_btn.setCursor(Qt.PointingHandCursor)
-        top_bar.addWidget(self.col_filter_btn)
         self.stats_label = QLabel()
         self.stats_label.setObjectName("statusLabel")
         top_bar.addWidget(self.stats_label)
         top_bar.addStretch()
         layout.addLayout(top_bar)
 
-        # ── QTableView ──
-        self.table = QTableView()
-        self.model = QuestionTableModel(self.table)
-        self.delegate = QuestionDelegate(self.table)
-        self.delegate._panel = self
-        self.table.setModel(self.model)
-        self.table.setItemDelegate(self.delegate)
-
-        # 表头
-        self.table.setVerticalHeader(HighlightHeader(Qt.Vertical))
-        self.table.setHorizontalHeader(HighlightHeader(Qt.Horizontal))
-        self.table.verticalHeader()._table_ref = self.table
-        self.table.horizontalHeader()._table_ref = self.table
-        vh = self.table.verticalHeader()
-        vh.setSectionsClickable(True)
-        vh.setSectionResizeMode(QHeaderView.Interactive)  # 允许手动调节行高
-        vh.sectionClicked.connect(self._on_row_header_clicked)
-        hh = self.table.horizontalHeader()
-        hh.setSectionsClickable(True)
-        hh.sectionClicked.connect(self._on_header_clicked)
-        hh.setContextMenuPolicy(Qt.CustomContextMenu)
-        hh.customContextMenuRequested.connect(self._on_header_context_menu)
-        # 角标按钮
-        from PyQt5.QtWidgets import QAbstractButton
-        corner = self.table.findChild(QAbstractButton)
-        if corner:
-            corner.clicked.connect(self._on_corner_clicked)
-
-        # 选择行为
-        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
-        self.table.setWordWrap(True)
-        self.table.setAutoScroll(False)
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._show_context_menu)
-        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.table.setShowGrid(True)
-
-        # 选中变化
-        self.table.selectionModel().selectionChanged.connect(
-            self._on_selection_changed)
-
-        # 列宽
-        self._setup_columns()
-
-        # 事件过滤
-        self.table.viewport().installEventFilter(self)
-        self.table.installEventFilter(self)
-
-        # 自动滚动
-        self._auto_scroll_timer = QTimer()
-        self._auto_scroll_timer.timeout.connect(self._do_auto_scroll)
-
-        layout.addWidget(self.table)
-
-        # 列筛选菜单
-        self._col_menu = QMenu(self)
-        for c in range(COL_COUNT):
-            if c in (COL_IDX, COL_OPS):        # 允许 COL_SEL 在筛选器中
-                continue
-            action = self._col_menu.addAction(HEADERS[c])
-            action.setCheckable(True)
-            action.setChecked(not self.table.isColumnHidden(c))
-            action.setData(c)
-            action.toggled.connect(
-                lambda checked, col=c: self.table.setColumnHidden(col, not checked))
-        self.col_filter_btn.clicked.connect(
-            lambda: self._col_menu.exec_(
-                self.col_filter_btn.mapToGlobal(self.col_filter_btn.rect().bottomLeft())))
+        # ── QWebEngineView ──
+        self.webview = QWebEngineView()
+        self.webview.setMinimumHeight(400)
+        layout.addWidget(self.webview)
 
         # 翻页
         page_frame = CardWidget()
@@ -768,62 +221,23 @@ class QuestionListPanel(QWidget):
         pl.addWidget(self.next_btn)
         layout.addWidget(page_frame)
 
-        # 初始隐藏列
-        self.table.setColumnHidden(COL_UID, True)
-        self.table.setColumnHidden(COL_NOTES, True)
+    # ── Bridge + WebView 初始化 ──
+    def _setup_bridge(self):
+        self._bridge = QuestionTableBridge(self)
+        self._channel = QWebChannel()
+        self._channel.registerObject("bridge", self._bridge)
+        self.webview.page().setWebChannel(self._channel)
 
-    def _setup_columns(self):
-        hh = self.table.horizontalHeader()
-        fm = QFontMetrics(hh.font())
-        def _w(text, min_w=60):
-            return max(min_w, fm.width(text) + 24)
-        # 固定列（序号和操作固定，其他可拖拽）
-        for c, w in [(COL_IDX, _w(HEADERS[COL_IDX], 80)),
-                     (COL_OPS, 180)]:
-            self.table.setColumnWidth(c, w)
-            hh.setSectionResizeMode(c, QHeaderView.Fixed)
-        # 可调整列：全部 Interactive，无 Stretch → 可无限右扩展
-        interactive_cols = [COL_UID, COL_STAR, COL_QUESTION, COL_CAT,
-                           COL_TAGS, COL_ANSWER, COL_NOTES, COL_WRONG, COL_DATE, COL_SEL]
-        for c in interactive_cols:
-            hh.setSectionResizeMode(c, QHeaderView.Interactive)
-        self.table.setColumnWidth(COL_UID, _w(HEADERS[COL_UID], 140))
-        self.table.setColumnWidth(COL_STAR, _w(HEADERS[COL_STAR], 50))
-        self.table.setColumnWidth(COL_QUESTION, max(500, _w(HEADERS[COL_QUESTION])))
-        self.table.setColumnWidth(COL_CAT, _w(HEADERS[COL_CAT], 100))
-        self.table.setColumnWidth(COL_TAGS, _w(HEADERS[COL_TAGS], 150))
-        self.table.setColumnWidth(COL_ANSWER, _w(HEADERS[COL_ANSWER], 200))
-        self.table.setColumnWidth(COL_NOTES, _w(HEADERS[COL_NOTES], 100))
-        self.table.setColumnWidth(COL_WRONG, _w(HEADERS[COL_WRONG], 60))
-        self.table.setColumnWidth(COL_DATE, _w(HEADERS[COL_DATE], 140))
-        self.table.setColumnWidth(COL_SEL, _w(HEADERS[COL_SEL], 70))
-        # 不拉伸最后一列，允许水平滚动
-        hh.setStretchLastSection(False)
+        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "table.html")
+        if os.path.exists(html_path):
+            self.webview.load(QUrl.fromLocalFile(html_path))
+        else:
+            self.webview.setHtml("<h3>table.html not found at: " + html_path + "</h3>")
 
-    def _setup_shortcuts(self):
-        self._shortcut_actions = {
-            "select_all":  lambda: self.table.selectAll(),
-            "goto_dialog": self._show_goto_dialog,
-            "select_col":  self._handle_select_col,
-            "select_row":  self._handle_select_row,
-            "select_region": self._select_current_region,
-            "jump_edge_up":    lambda: self._jump_to_data_edge('up'),
-            "jump_edge_down":  lambda: self._jump_to_data_edge('down'),
-            "jump_edge_left":  lambda: self._jump_to_data_edge('left'),
-            "jump_edge_right": lambda: self._jump_to_data_edge('right'),
-            "prev_page": self._prev_page,
-            "next_page": self._next_page,
-            "clear_selection": self._clear_all_selection,
-        }
-
-    # ── 持久选中（跨页保持，直到切换功能页面）──
+    # ── 属性 ──
     @property
     def _selected_ids(self):
         return self._persistent_selected_ids
-
-    @_selected_ids.setter
-    def _selected_ids(self, value):
-        self._persistent_selected_ids = value
 
     # ── 搜索与数据 ──
     def _total_pages(self):
@@ -863,385 +277,149 @@ class QuestionListPanel(QWidget):
             self._apply_sort()
         else:
             self.current_page = 0
-            self._refresh_table()
+            self._push_data()
 
-    def _refresh_table(self):
-        self._refreshing_table = True
-        try:
-            total = len(self.all_questions)
-            total_pages = self._total_pages()
-            if self.current_page >= total_pages:
-                self.current_page = total_pages - 1
-            saved = self._persistent_selected_ids.copy()
-            self._expanded_answers.clear()
-            self.model._selection = saved
-            self.model.load_page(self.all_questions, self.current_page,
-                                 total, AppSettings().image_display_mode)
-            # 恢复选中（只恢复当前页中在持久集合里的项）
-            if saved:
-                for r, q in enumerate(self.model._questions):
-                    if q["id"] in saved:
-                        self.table.selectRow(r)
-            # 更新UI
-            self._update_pagination(total, total_pages)
-            self._on_selection_changed()
-            # 列宽+行高刷新
-            QTimer.singleShot(80, lambda: (
-                self.table.resizeColumnsToContents(),
-                self.table.resizeRowsToContents()
-            ))
-        finally:
-            self._refreshing_table = False
+    def _make_cat_map(self):
+        cm = {}
+        for c in models.get_all_categories():
+            cm[c["id"]] = c["name"]
+        return cm
 
-    def _update_pagination(self, total, total_pages):
-        count = len(self._persistent_selected_ids)
-        if count:
-            self.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
-        else:
-            self.stats_label.setText(f"共 {total} 道题目")
-        self.page_label.setText(
-            f"第 {self.current_page + 1} / {total_pages} 页")
+    def _push_data(self):
+        """将当前页数据序列化为 JSON 推送到 JS 表格"""
+        total = len(self.all_questions)
+        total_pages = self._total_pages()
+        if self.current_page >= total_pages:
+            self.current_page = total_pages - 1
+        start = self.current_page * PAGE_SIZE
+        end = min(start + PAGE_SIZE, total)
+        page_items = self.all_questions[start:end]
+
+        mode = AppSettings().image_display_mode
+        cat_map = self._make_cat_map()
+        rows = []
+        for i, q in enumerate(page_items):
+            imgs = models.get_question_images(q["id"])
+            q_imgs = [x for x in imgs if x["image_type"] == "question"]
+            a_imgs = [x for x in imgs if x["image_type"] == "answer"]
+            tags = models.get_question_tags(q["id"])
+            cat_name = cat_map.get(q.get("category_id"), "")
+            u = q.get("updated_at", "")
+            if u and len(u) > 16:
+                u = u[:10].replace("-", "/") + " " + u[11:19]
+
+            rows.append({
+                "id": q["id"],
+                "idx": start + i + 1,
+                "uid": q.get("uid", "") or "-",
+                "starred": q.get("starred", 0),
+                "question": q.get("question_text", ""),
+                "q_img": q_imgs[0]["image_path"] if q_imgs else "",
+                "img_mode": mode,
+                "cat": cat_name,
+                "tags": [{"id": t["id"], "name": t["name"],
+                          "color": t.get("color", "#4A90D9")} for t in tags],
+                "answer": q.get("answer_text", ""),
+                "a_img": a_imgs[0]["image_path"] if a_imgs else "",
+                "ans_expanded": q["id"] in self._expanded_answers,
+                "notes": q.get("notes", ""),
+                "wrong_count": q.get("wrong_count", 0),
+                "updated_at": u or "-",
+            })
+
+        json_str = json.dumps(rows, ensure_ascii=False)
+        # 转义给 JS
+        json_str = json_str.replace("\\", "\\\\").replace("'", "\\'")
+        self.webview.page().runJavaScript(
+            "loadData('" + json_str + "')")
+
+        self.stats_label.setText(f"共 {total} 道题目")
+        self.page_label.setText(f"第 {self.current_page + 1} / {total_pages} 页")
         self.prev_btn.setEnabled(self.current_page > 0)
         self.next_btn.setEnabled(self.current_page < total_pages - 1)
 
+    # ── 翻页 ──
     def _prev_page(self):
         if self.current_page > 0:
             self.current_page -= 1
-            self._refresh_table()
+            self._push_data()
 
     def _next_page(self):
         if self.current_page < self._total_pages() - 1:
             self.current_page += 1
-            self._refresh_table()
-
-    def _get_question_at_row(self, row):
-        return self.model.question_at_row(row)
-
-    # ── 选择同步 ──
-    def _on_selection_changed(self):
-        """从 Qt 选择模型同步到持久选中的 ID 集合（跨页保持，刷新期间跳过）"""
-        sel_model = self.table.selectionModel()
-        model = self.model
-
-        # 刷新期间：model 数据尚未完成切换，禁止修改持久集合
-        if self._refreshing_table:
-            return
-
-        # 本页当前被选中的题目 ID
-        page_selected = set()
-        rows_seen = set()
-        for idx in sel_model.selectedIndexes():
-            r = idx.row()
-            if r not in rows_seen:
-                rows_seen.add(r)
-                q = model.question_at_row(r)
-                if q:
-                    page_selected.add(q["id"])
-
-        # 本页所有题目 ID
-        page_ids = {q["id"] for q in model._questions}
-
-        # 用本页的选择覆盖持久集合中的对应部分
-        self._persistent_selected_ids.difference_update(page_ids)
-        self._persistent_selected_ids.update(page_selected)
-
-        # 同步 model._selection 供 CheckStateRole 使用
-        model._selection = self._persistent_selected_ids
-
-        # 更新标签（显示持久选中总数）
-        count = len(self._persistent_selected_ids)
-        total = len(self.all_questions)
-        if count:
-            self.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
-        else:
-            self.stats_label.setText(f"共 {total} 道题目")
-
-        # 刷新表头（高亮）
-        self.table.verticalHeader().viewport().update()
-        self.table.horizontalHeader().viewport().update()
-
-        # 通知 model 刷新复选框列
-        if model.rowCount() > 0:
-            top = model.index(0, COL_SEL)
-            bot = model.index(model.rowCount() - 1, COL_SEL)
-            model.dataChanged.emit(top, bot, [Qt.CheckStateRole])
-
-    def _on_star_toggled(self, qid):
-        self.model.toggle_star(qid)
+            self._push_data()
 
     # ── 排序 ──
-    def _on_header_clicked(self, col):
-        """列头点击 = 选中整列"""
-        modifiers = QApplication.keyboardModifiers()
-        sel = self.table.selectionModel()
-        model = self.model
-        if modifiers & Qt.ControlModifier:
-            for r in range(model.rowCount()):
-                sel.select(model.index(r, col), sel.Select)
-        elif modifiers & Qt.ShiftModifier:
-            self.table.selectColumn(col)
-        else:
-            self.table.clearSelection()
-            self.table.selectColumn(col)
+    SORT_KEYS = {
+        "uid": lambda q: q.get("uid", ""),
+        "starred": lambda q: q.get("starred", 0),
+        "question": lambda q: q.get("question_text", ""),
+        "cat": lambda q: q.get("category_id") or 0,
+        "tags": lambda q: q.get("_tags_str", ""),
+        "answer": lambda q: q.get("answer_text", ""),
+        "notes": lambda q: q.get("notes", ""),
+        "wrong_count": lambda q: q.get("wrong_count", 0),
+        "updated_at": lambda q: q.get("updated_at", ""),
+    }
+    SORT_LABELS = [
+        ("uid", "初始编号"), ("starred", "星标"),
+        ("question", "题目"), ("cat", "分类"),
+        ("tags", "标签"), ("answer", "答案"),
+        ("notes", "备注"), ("wrong_count", "错次"),
+        ("updated_at", "最近修改"),
+    ]
 
-    def _on_header_context_menu(self, pos):
-        col = self.table.horizontalHeader().logicalIndexAt(pos)
-        if col not in SORT_KEYS:
-            return
+    def _show_sort_menu(self, global_pos):
         menu = QMenu(self)
-        menu.addAction("↑ 升序排列", lambda: self._set_sort(col, 1))
-        menu.addAction("↓ 降序排列", lambda: self._set_sort(col, 2))
-        menu.addAction("— 恢复默认顺序", lambda: self._set_sort(-1, 0))
-        menu.exec_(self.table.horizontalHeader().viewport().mapToGlobal(pos))
+        menu.addAction("— 恢复默认顺序", lambda: self._apply_py_sort(None, 0))
+        menu.addSeparator()
+        for field, label in self.SORT_LABELS:
+            menu.addAction(f"↑ {label} 升序",
+                           lambda f=field: self._apply_py_sort(f, 1))
+            menu.addAction(f"↓ {label} 降序",
+                           lambda f=field: self._apply_py_sort(f, 2))
+        menu.exec_(global_pos)
 
-    def _set_sort(self, col, state):
+    def _apply_py_sort(self, field, state):
         if state == 0:
             self._sort_col = -1
             self._sort_state = 0
             self.sort_btn.setText("排序 ▾")
-        else:
-            self._sort_col = col
-            self._sort_state = state
-            arrow = " ↑" if state == 1 else " ↓"
-            self.sort_btn.setText(f"排序: {HEADERS[col]}{arrow}")
-        self._apply_sort()
-
-    def _show_sort_menu(self, global_pos):
-        menu = QMenu(self)
-        menu.addAction("— 恢复默认顺序", lambda: self._set_sort(-1, 0))
-        menu.addSeparator()
-        for col, header in enumerate(HEADERS):
-            if col in SORT_KEYS:
-                menu.addAction(f"↑ {header} 升序", lambda c=col: self._set_sort(c, 1))
-                menu.addAction(f"↓ {header} 降序", lambda c=col: self._set_sort(c, 2))
-        menu.exec_(global_pos)
-
-    def _apply_sort(self):
-        hh = self.table.horizontalHeader()
-        if self._sort_state == 0:
             if self._original_order:
                 self.all_questions = self._original_order[:]
-            hh.setSortIndicatorShown(False)
-            self._sort_col = -1
         else:
-            key = SORT_KEYS.get(self._sort_col)
-            if key:
-                self.all_questions.sort(key=key, reverse=(self._sort_state == 2))
-            hh.setSortIndicator(
-                self._sort_col,
-                Qt.AscendingOrder if self._sort_state == 1 else Qt.DescendingOrder)
-            hh.setSortIndicatorShown(True)
+            self._sort_col = 0
+            self._sort_state = state
+            key = self.SORT_KEYS[field]
+            self.all_questions.sort(key=key, reverse=(state == 2))
+            self.sort_btn.setText(f"排序: {field} {'↑' if state == 1 else '↓'}")
         self.current_page = 0
-        self._refresh_table()
+        self._push_data()
 
-    # ── 行高 ──
-    def _update_row_height(self, row):
-        self.table.resizeRowToContents(row)
-
-    # ── 键盘快捷键 ──
-    def _parse_key_event(self, event):
-        parts = []
-        if event.modifiers() & Qt.ControlModifier:
-            parts.append("Ctrl")
-        if event.modifiers() & Qt.ShiftModifier:
-            parts.append("Shift")
-        if event.modifiers() & Qt.AltModifier:
-            parts.append("Alt")
-        key = event.key()
-        if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
-            return None
-        key_name = QKeySequence(key).toString()
-        if key_name:
-            parts.append(key_name)
-        return "+".join(parts) if parts else key_name
-
-    def keyPressEvent(self, event):
-        key_seq = self._parse_key_event(event)
-        if key_seq is None:
-            super().keyPressEvent(event)
+    # ── 删除 ──
+    def _delete_question(self, qid):
+        reply = QMessageBox.question(
+            self, "确认删除", "确定要删除这道题目吗？此操作不可恢复。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
             return
-        settings = AppSettings()
-        for action_id, handler in self._shortcut_actions.items():
-            if settings.get_shortcut(action_id) == key_seq:
-                handler()
-                return
-        super().keyPressEvent(event)
+        images = models.get_question_images(qid)
+        for img in images:
+            if os.path.exists(img["image_path"]):
+                os.remove(img["image_path"])
+        models.delete_question(qid)
+        self._do_search()
 
-    # ── 选择操作 ──
-    def _clear_all_selection(self):
-        """ESC：清除所有选中（包括跨页持久选中）并刷新复选框"""
-        self._persistent_selected_ids.clear()
-        self.model._selection.clear()
-        self.table.clearSelection()
-        total = len(self.all_questions)
-        self.stats_label.setText(f"共 {total} 道题目")
-        # 刷新复选框列
-        m = self.model
-        if m.rowCount() > 0:
-            m.dataChanged.emit(m.index(0, COL_SEL),
-                               m.index(m.rowCount() - 1, COL_SEL),
-                               [Qt.CheckStateRole])
-
-    def _handle_select_col(self):
-        cur = self.table.currentIndex()
-        if cur.isValid():
-            self.table.selectColumn(cur.column())
-
-    def _handle_select_row(self):
-        cur = self.table.currentIndex()
-        if cur.isValid():
-            self.table.selectRow(cur.row())
-
-    def _select_current_region(self):
-        cur = self.table.currentIndex()
-        if not cur.isValid():
-            return
-        r0, c0 = cur.row(), cur.column()
-        rc, cc = self.model.rowCount(), self.model.columnCount()
-
-        def filled(r, c):
-            idx = self.model.index(r, c)
-            return bool(idx.data(Qt.DisplayRole)) or bool(idx.data(Qt.UserRole))
-
-        if not filled(r0, c0):
-            return
-
-        r_top = r_bot = r0
-        while r_top > 0 and filled(r_top - 1, c0):
-            r_top -= 1
-        while r_bot < rc - 1 and filled(r_bot + 1, c0):
-            r_bot += 1
-        c_left = c_right = c0
-        while c_left > 0 and filled(r0, c_left - 1):
-            c_left -= 1
-        while c_right < cc - 1 and filled(r0, c_right + 1):
-            c_right += 1
-
-        top_left = self.model.index(r_top, c_left)
-        bot_right = self.model.index(r_bot, c_right)
-        self.table.selectionModel().select(
-            QItemSelection(top_left, bot_right),
-            self.table.selectionModel().ClearAndSelect)
-
-    def _jump_to_data_edge(self, direction):
-        cur = self.table.currentIndex()
-        if not cur.isValid():
-            return
-        r, c = cur.row(), cur.column()
-        dr = {'up': -1, 'down': 1, 'left': 0, 'right': 0}[direction]
-        dc = {'up': 0, 'down': 0, 'left': -1, 'right': 1}[direction]
-        rc, cc = self.model.rowCount(), self.model.columnCount()
-
-        def filled(rr, cc_co):
-            idx = self.model.index(rr, cc_co)
-            return bool(idx.data(Qt.DisplayRole)) or bool(idx.data(Qt.UserRole))
-
-        nr, nc = r + dr, c + dc
-        while 0 <= nr < rc and 0 <= nc < cc and filled(nr, nc):
-            nr += dr
-            nc += dc
-        nr -= dr
-        nc -= dc
-        if 0 <= nr < rc and 0 <= nc < cc:
-            self.table.setCurrentIndex(self.model.index(nr, nc))
-
-    def _show_goto_dialog(self):
-        from PyQt5.QtWidgets import QFormLayout, QSpinBox
-        dlg = QDialog(self)
-        dlg.setWindowTitle("转到单元格")
-        dlg.setMinimumWidth(300)
-        layout = QFormLayout(dlg)
-        row_spin = QSpinBox()
-        row_spin.setRange(1, self.model.rowCount())
-        row_spin.setValue(self.table.currentIndex().row() + 1)
-        layout.addRow("行号:", row_spin)
-        col_spin = QSpinBox()
-        col_spin.setRange(1, COL_COUNT)
-        col_spin.setValue(self.table.currentIndex().column() + 1)
-        layout.addRow("列号:", col_spin)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        layout.addRow(btns)
-        if dlg.exec_() == QDialog.Accepted:
-            r, c = row_spin.value() - 1, col_spin.value() - 1
-            if 0 <= r < self.model.rowCount() and 0 <= c < COL_COUNT:
-                self.table.setCurrentIndex(self.model.index(r, c))
-
-    def _on_row_header_clicked(self, row):
-        modifiers = QApplication.keyboardModifiers()
-        sel = self.table.selectionModel()
-        model = self.model
-        if modifiers & Qt.ControlModifier:
-            first_idx = model.index(row, 0)
-            toggle_on = not sel.isSelected(first_idx)
-            for c in range(COL_COUNT):
-                sel.select(model.index(row, c),
-                           sel.Select if toggle_on else sel.Deselect)
-        elif modifiers & Qt.ShiftModifier:
-            self.table.selectRow(row)
-        else:
-            self.table.clearSelection()
-            self.table.selectRow(row)
-
-    def _on_corner_clicked(self):
-        self.table.selectAll()
-
-    # ── 事件过滤 ──
-    def eventFilter(self, obj, event):
-        viewport = self.table.viewport()
-        if obj is self.table:
-            if event.type() == QEvent.KeyPress:
-                return False
-        if obj is viewport:
-            if event.type() == QEvent.MouseButtonRelease:
-                self._auto_scroll_timer.stop()
-                self._dragging = False
-            elif event.type() == QEvent.Wheel:
-                if event.modifiers() & Qt.ShiftModifier:
-                    bar = self.table.horizontalScrollBar()
-                    bar.setValue(bar.value() - event.angleDelta().y())
-                    return True
-            elif event.type() == QEvent.MouseMove:
-                if event.buttons() & Qt.LeftButton:
-                    self._dragging = True
-                    vp_h = viewport.height()
-                    edge = 30
-                    py = event.pos().y()
-                    if py > vp_h - edge:
-                        self._auto_scroll_dir = 1
-                        self._auto_scroll_timer.start(50)
-                    elif 0 <= py < edge:
-                        self._auto_scroll_dir = -1
-                        self._auto_scroll_timer.start(50)
-                    else:
-                        self._auto_scroll_timer.stop()
-                    return False
-                else:
-                    self._auto_scroll_timer.stop()
-            elif event.type() == QEvent.Leave:
-                self._auto_scroll_timer.stop()
-        return super().eventFilter(obj, event)
-
-    def _do_auto_scroll(self):
-        bar = self.table.verticalScrollBar()
-        bar.setValue(bar.value() + self._auto_scroll_dir * bar.singleStep())
-
-    # ── 上下文菜单 ──
-    def _show_context_menu(self, pos):
-        idx = self.table.indexAt(pos)
-        if not idx.isValid():
-            return
-        q = self.model.question_at_row(idx.row())
-        if q is None:
-            return
+    # ── 右键菜单 ──
+    def _show_row_context(self, q):
         menu = QMenu(self)
         a_view = menu.addAction("查看详情")
         a_edit = menu.addAction("编辑")
         a_reset = menu.addAction("重置错题计数")
         menu.addSeparator()
         a_del = menu.addAction("删除")
-        action = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        pos = self.cursor().pos()
+        action = menu.exec_(pos)
         if action == a_edit:
             self.edit_requested.emit(q["id"])
         elif action == a_del:
@@ -1263,22 +441,9 @@ class QuestionListPanel(QWidget):
         detail += f"【做错次数】{q['wrong_count']}"
         QMessageBox.information(self, "题目详情", detail)
 
-    def _delete_question(self, qid):
-        reply = QMessageBox.question(
-            self, "确认删除", "确定要删除这道题目吗？此操作不可恢复。",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
-        images = models.get_question_images(qid)
-        for img in images:
-            if os.path.exists(img["image_path"]):
-                os.remove(img["image_path"])
-        models.delete_question(qid)
-        self._do_search()
-
     # ── 批量操作 ──
     def _get_selected_or_all(self):
-        selected = self._selected_ids
+        selected = self._persistent_selected_ids
         if selected:
             return [q for q in self.all_questions if q["id"] in selected]
         return self.all_questions
@@ -1300,8 +465,7 @@ class QuestionListPanel(QWidget):
         if new_id is None:
             return
         models.batch_set_category([q["id"] for q in to_edit], new_id)
-        QMessageBox.information(
-            self, "完成",
+        QMessageBox.information(self, "完成",
             f"已创建分类「{name.strip()}」并将 {len(to_edit)} 道题目移入。")
         self._refresh_filters()
         self._do_search()
@@ -1355,7 +519,6 @@ class QuestionListPanel(QWidget):
                     f"background-color: {c}; border: 1px solid #999; border-radius: 4px;"))
             preset_row.addWidget(pb)
         layout.addLayout(preset_row)
-
         def pick_color():
             c = QColorDialog.getColor()
             if c.isValid():
@@ -1397,7 +560,7 @@ class QuestionListPanel(QWidget):
         if not parent_dir:
             return
         total = len(to_export)
-        label = f"已选中 {total} 道" if self._selected_ids else f"当前筛选共 {total} 道"
+        label = f"已选中 {total} 道" if self._persistent_selected_ids else f"当前筛选共 {total} 道"
         reply = QMessageBox.question(
             self, "确认导出",
             f"将导出 {label} 题目。\n导出格式为包含 index.html 和图片的文件夹。\n确认继续？",
@@ -1411,7 +574,6 @@ class QuestionListPanel(QWidget):
         progress.setValue(0)
         QApplication.processEvents()
         cancelled = [False]
-
         def on_progress(step, cur, total):
             if progress.wasCanceled():
                 cancelled[0] = True
@@ -1420,12 +582,7 @@ class QuestionListPanel(QWidget):
             progress.setLabelText(label)
             try:
                 ci, ct = int(cur), int(total)
-                if step == "copying":
-                    pct = int(10 + 80 * ci / max(ct, 1))
-                elif step.startswith("生成"):
-                    pct = 95
-                else:
-                    pct = min(5, int(5 * ci / max(ct, 1)))
+                pct = 95 if step.startswith("生成") else int(min(5, 5 * ci / max(ct, 1)))
                 progress.setValue(pct)
             except ValueError:
                 pass
@@ -1558,7 +715,6 @@ class QuestionListPanel(QWidget):
         cur = [tag_color]
         cb.setStyleSheet(
             f"background-color: {cur[0]}; border:1px solid #999; border-radius:4px;")
-
         def epc():
             c = QColorDialog.getColor()
             if c.isValid():
@@ -1581,7 +737,8 @@ class QuestionListPanel(QWidget):
 
     def _delete_tag(self, tag_id):
         reply = QMessageBox.question(
-            self, "确认删除", "确定要删除此标签吗？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            self, "确认删除", "确定要删除此标签吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             models.delete_tag(tag_id)
             self._refresh_filters()
@@ -1592,11 +749,7 @@ class QuestionListPanel(QWidget):
         self._persistent_selected_ids.clear()
         self._refresh_filters()
         self._do_search()
-        QTimer.singleShot(100, self.table.resizeRowsToContents)
 
     def update_dynamic_styles(self):
-        self._refresh_table()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.table.resizeRowsToContents()
+        scale = AppSettings().font_scale
+        self.webview.page().runJavaScript(f"setFontScale({scale})")
