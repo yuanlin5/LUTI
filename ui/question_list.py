@@ -1,26 +1,19 @@
 """
-题库管理面板 — QWebEngineView + Tabulator.js 重构版
-
-JavaScript 表格库通过 QWebChannel 与 Python 后端通信。
-Python 负责：数据库操作、UI 控件（搜索/筛选/翻页/批量操作）
-JS 负责：表格渲染、选择、排序、交互
+题库管理面板 — QWebEngineView + Tabulator.js
+JS→Python 通过 URL 拦截通信，Python→JS 通过 runJavaScript()
 """
-import os
-import json
-import subprocess
+import os, json, subprocess
+from urllib.parse import unquote
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QMessageBox, QMenu, QFrame, QApplication,
+    QMessageBox, QMenu, QApplication,
     QFileDialog, QProgressDialog, QInputDialog,
     QDialog, QCheckBox, QDialogButtonBox, QColorDialog,
 )
-from PyQt5.QtCore import (
-    Qt, pyqtSignal, QTimer, QUrl, QObject, pyqtSlot, pyqtProperty,
-)
-from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtWebChannel import QWebChannel
+from PyQt5.QtCore import Qt, pyqtSignal, QUrl
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 from qfluentwidgets import (
-    PrimaryPushButton, PushButton, ComboBox, LineEdit, CardWidget,
+    PushButton, ComboBox, LineEdit, CardWidget,
 )
 from database import models
 from config import AppSettings
@@ -29,75 +22,8 @@ from services.export_service import export_questions
 PAGE_SIZE = 20
 
 
-# ============================================================================
-# Bridge — Python ↔ JavaScript 通信桥梁
-# ============================================================================
-class QuestionTableBridge(QObject):
-    """暴露给 JavaScript 的 Python API"""
-
-    def __init__(self, panel):
-        super().__init__()
-        self._panel = panel
-
-    @pyqtSlot(str, result=str)
-    def toggle_star(self, qid):
-        """切换星标 → 返回新状态 JSON"""
-        new_val = models.toggle_star(int(qid))
-        for q in self._panel.all_questions:
-            if q["id"] == int(qid):
-                q["starred"] = new_val
-                break
-        return json.dumps({"starred": new_val})
-
-    @pyqtSlot(str)
-    def edit_question(self, qid):
-        """编辑题目"""
-        self._panel.edit_requested.emit(int(qid))
-
-    @pyqtSlot(str)
-    def delete_question(self, qid):
-        """删除题目"""
-        self._panel._delete_question(int(qid))
-
-    @pyqtSlot(str)
-    def edit_tag(self, tag_id):
-        """编辑标签"""
-        self._panel._safe_edit_tag(int(tag_id))
-
-    @pyqtSlot(str, int, int)
-    def row_context(self, qid, x, y):
-        """右键菜单（由 Python 弹出）"""
-        qid = int(qid)
-        q = next((q for q in self._panel.all_questions if q["id"] == qid), None)
-        if q is None:
-            return
-        self._panel._show_row_context(q)
-
-    @pyqtSlot(str)
-    def selection_changed(self, ids_json):
-        """JS 选择变化时同步"""
-        ids = json.loads(ids_json)
-        self._panel._persistent_selected_ids = set(ids)
-        count = len(ids)
-        total = len(self._panel.all_questions)
-        if count:
-            self._panel.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
-        else:
-            self._panel.stats_label.setText(f"共 {total} 道题目")
-
-    @pyqtSlot()
-    def selection_cleared(self):
-        """ESC 清除所有选中"""
-        self._panel._persistent_selected_ids.clear()
-        total = len(self._panel.all_questions)
-        self._panel.stats_label.setText(f"共 {total} 道题目")
-
-
-# ============================================================================
-# QuestionListPanel — 主面板
-# ============================================================================
 class QuestionListPanel(QWidget):
-    """题库管理面板：QWebEngineView + JavaScript 表格 + Python 控件"""
+    """题库管理面板：QWebEngineView + Tabulator.js"""
 
     edit_requested = pyqtSignal(int)
 
@@ -111,9 +37,9 @@ class QuestionListPanel(QWidget):
         self._persistent_selected_ids = set()
         self._expanded_answers = set()
         self._setup_ui()
-        self._setup_bridge()
+        self._setup_webview()
 
-    # ── UI 构建 ──
+    # ── UI ──
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 20, 30, 20)
@@ -123,7 +49,7 @@ class QuestionListPanel(QWidget):
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
-        # 搜索/筛选栏（保持不变）
+        # 搜索/筛选
         filter_frame = CardWidget()
         filter_frame.setObjectName("card")
         fl = QHBoxLayout(filter_frame)
@@ -167,9 +93,8 @@ class QuestionListPanel(QWidget):
         self.sort_btn = PushButton("排序 ▾")
         self.sort_btn.setObjectName("secondaryBtn")
         self.sort_btn.setCursor(Qt.PointingHandCursor)
-        self.sort_btn.clicked.connect(
-            lambda: self._show_sort_menu(
-                self.sort_btn.mapToGlobal(self.sort_btn.rect().bottomLeft())))
+        self.sort_btn.clicked.connect(lambda: self._show_sort_menu(
+            self.sort_btn.mapToGlobal(self.sort_btn.rect().bottomLeft())))
         fl.addWidget(self.sort_btn)
 
         self.batch_btn = PushButton("选择操作 ▾")
@@ -179,11 +104,9 @@ class QuestionListPanel(QWidget):
         self._batch_menu.addAction("导出题库", self._export_questions)
         self._batch_menu.addAction("添加标签", self._batch_add_tags)
         self._batch_menu.addAction("添加到新分类", self._batch_move_category)
-        self.batch_btn.clicked.connect(
-            lambda: self._batch_menu.exec_(
-                self.batch_btn.mapToGlobal(self.batch_btn.rect().bottomLeft())))
+        self.batch_btn.clicked.connect(lambda: self._batch_menu.exec_(
+            self.batch_btn.mapToGlobal(self.batch_btn.rect().bottomLeft())))
         fl.addWidget(self.batch_btn)
-
         layout.addWidget(filter_frame)
 
         # 统计栏
@@ -194,7 +117,7 @@ class QuestionListPanel(QWidget):
         top_bar.addStretch()
         layout.addLayout(top_bar)
 
-        # ── QWebEngineView ──
+        # WebView
         self.webview = QWebEngineView()
         self.webview.setMinimumHeight(400)
         layout.addWidget(self.webview)
@@ -205,7 +128,6 @@ class QuestionListPanel(QWidget):
         pl = QHBoxLayout(page_frame)
         pl.setContentsMargins(12, 8, 12, 8)
         pl.setSpacing(10)
-
         self.prev_btn = PushButton("◀ 上一页")
         self.prev_btn.setObjectName("smallBtn")
         self.prev_btn.clicked.connect(self._prev_page)
@@ -221,18 +143,72 @@ class QuestionListPanel(QWidget):
         pl.addWidget(self.next_btn)
         layout.addWidget(page_frame)
 
-    # ── Bridge + WebView 初始化 ──
-    def _setup_bridge(self):
-        self._bridge = QuestionTableBridge(self)
-        self._channel = QWebChannel()
-        self._channel.registerObject("bridge", self._bridge)
-        self.webview.page().setWebChannel(self._channel)
-
+    # ── WebView + JS Bridge ──
+    def _setup_webview(self):
         html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "table.html")
-        if os.path.exists(html_path):
-            self.webview.load(QUrl.fromLocalFile(html_path))
+        self.webview.load(QUrl.fromLocalFile(html_path))
+        self._page = self.webview.page()
+
+        # 拦截 py:// 协议实现 JS→Python 通信
+        class BridgePage(QWebEnginePage):
+            def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+                if url.scheme() == "py":
+                    panel._handle_bridge(url)
+                    return False
+                return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
+        panel = self
+        self.webview.setPage(BridgePage(self._page.profile()))
+
+    def _handle_bridge(self, url):
+        """处理 JS 端的 pyCall()"""
+        try:
+            path = url.path()  # /call/encoded_json
+            if path.startswith("/call/"):
+                payload = url.path()[len("/call/"):]
+                data = json.loads(unquote(payload))
+                action = data.get("a")
+                arg = data.get("d")
+                self._do_action(action, arg)
+        except Exception:
+            pass
+
+    def _do_action(self, action, arg):
+        if action == "toggle_star":
+            new_val = models.toggle_star(int(arg))
+            for q in self.all_questions:
+                if q["id"] == int(arg):
+                    q["starred"] = new_val
+                    break
+        elif action == "expand_answer":
+            self._expanded_answers.add(int(arg))
+        elif action == "collapse_answer":
+            self._expanded_answers.discard(int(arg))
+        elif action == "edit_question":
+            self.edit_requested.emit(int(arg))
+        elif action == "delete_question":
+            self._delete_question(int(arg))
+        elif action == "edit_tag":
+            self._safe_edit_tag(int(arg))
+        elif action == "selection_changed":
+            ids = set(json.loads(arg))
+            self._persistent_selected_ids = ids
+            self._update_stats()
+        elif action == "selection_cleared":
+            self._persistent_selected_ids.clear()
+            self._update_stats()
+        elif action == "row_context":
+            q = next((x for x in self.all_questions if x["id"] == int(arg)), None)
+            if q:
+                self._show_row_context(q)
+
+    def _update_stats(self):
+        total = len(self.all_questions)
+        count = len(self._persistent_selected_ids)
+        if count:
+            self.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
         else:
-            self.webview.setHtml("<h3>table.html not found at: " + html_path + "</h3>")
+            self.stats_label.setText(f"共 {total} 道题目")
 
     # ── 属性 ──
     @property
@@ -286,11 +262,10 @@ class QuestionListPanel(QWidget):
         return cm
 
     def _push_data(self):
-        """将当前页数据序列化为 JSON 推送到 JS 表格"""
         total = len(self.all_questions)
-        total_pages = self._total_pages()
-        if self.current_page >= total_pages:
-            self.current_page = total_pages - 1
+        tp = self._total_pages()
+        if self.current_page >= tp:
+            self.current_page = tp - 1
         start = self.current_page * PAGE_SIZE
         end = min(start + PAGE_SIZE, total)
         page_items = self.all_questions[start:end]
@@ -303,20 +278,17 @@ class QuestionListPanel(QWidget):
             q_imgs = [x for x in imgs if x["image_type"] == "question"]
             a_imgs = [x for x in imgs if x["image_type"] == "answer"]
             tags = models.get_question_tags(q["id"])
-            cat_name = cat_map.get(q.get("category_id"), "")
             u = q.get("updated_at", "")
             if u and len(u) > 16:
                 u = u[:10].replace("-", "/") + " " + u[11:19]
-
             rows.append({
-                "id": q["id"],
-                "idx": start + i + 1,
+                "id": q["id"], "idx": start + i + 1,
                 "uid": q.get("uid", "") or "-",
                 "starred": q.get("starred", 0),
                 "question": q.get("question_text", ""),
                 "q_img": q_imgs[0]["image_path"] if q_imgs else "",
                 "img_mode": mode,
-                "cat": cat_name,
+                "cat": cat_map.get(q.get("category_id"), ""),
                 "tags": [{"id": t["id"], "name": t["name"],
                           "color": t.get("color", "#4A90D9")} for t in tags],
                 "answer": q.get("answer_text", ""),
@@ -324,19 +296,16 @@ class QuestionListPanel(QWidget):
                 "ans_expanded": q["id"] in self._expanded_answers,
                 "notes": q.get("notes", ""),
                 "wrong_count": q.get("wrong_count", 0),
-                "updated_at": u or "-",
-            })
+                "updated_at": u or "-"})
 
         json_str = json.dumps(rows, ensure_ascii=False)
-        # 转义给 JS
         json_str = json_str.replace("\\", "\\\\").replace("'", "\\'")
-        self.webview.page().runJavaScript(
-            "loadData('" + json_str + "')")
+        self.webview.page().runJavaScript("loadData('" + json_str + "')")
 
-        self.stats_label.setText(f"共 {total} 道题目")
-        self.page_label.setText(f"第 {self.current_page + 1} / {total_pages} 页")
+        self._update_stats()
+        self.page_label.setText(f"第 {self.current_page + 1} / {tp} 页")
         self.prev_btn.setEnabled(self.current_page > 0)
-        self.next_btn.setEnabled(self.current_page < total_pages - 1)
+        self.next_btn.setEnabled(self.current_page < tp - 1)
 
     # ── 翻页 ──
     def _prev_page(self):
@@ -362,55 +331,44 @@ class QuestionListPanel(QWidget):
         "updated_at": lambda q: q.get("updated_at", ""),
     }
     SORT_LABELS = [
-        ("uid", "初始编号"), ("starred", "星标"),
-        ("question", "题目"), ("cat", "分类"),
-        ("tags", "标签"), ("answer", "答案"),
-        ("notes", "备注"), ("wrong_count", "错次"),
-        ("updated_at", "最近修改"),
+        ("uid", "初始编号"), ("starred", "星标"), ("question", "题目"),
+        ("cat", "分类"), ("tags", "标签"), ("answer", "答案"),
+        ("notes", "备注"), ("wrong_count", "错次"), ("updated_at", "最近修改"),
     ]
 
     def _show_sort_menu(self, global_pos):
         menu = QMenu(self)
-        menu.addAction("— 恢复默认顺序", lambda: self._apply_py_sort(None, 0))
+        menu.addAction("恢复默认顺序", lambda: self._apply_py_sort(None, 0))
         menu.addSeparator()
         for field, label in self.SORT_LABELS:
-            menu.addAction(f"↑ {label} 升序",
-                           lambda f=field: self._apply_py_sort(f, 1))
-            menu.addAction(f"↓ {label} 降序",
-                           lambda f=field: self._apply_py_sort(f, 2))
+            menu.addAction(f"↑ {label} 升序", lambda f=field: self._apply_py_sort(f, 1))
+            menu.addAction(f"↓ {label} 降序", lambda f=field: self._apply_py_sort(f, 2))
         menu.exec_(global_pos)
 
     def _apply_py_sort(self, field, state):
         if state == 0:
-            self._sort_col = -1
-            self._sort_state = 0
+            self._sort_col = -1; self._sort_state = 0
             self.sort_btn.setText("排序 ▾")
             if self._original_order:
                 self.all_questions = self._original_order[:]
         else:
-            self._sort_col = 0
-            self._sort_state = state
-            key = self.SORT_KEYS[field]
-            self.all_questions.sort(key=key, reverse=(state == 2))
+            self._sort_col = 0; self._sort_state = state
+            self.all_questions.sort(key=self.SORT_KEYS[field], reverse=(state == 2))
             self.sort_btn.setText(f"排序: {field} {'↑' if state == 1 else '↓'}")
         self.current_page = 0
         self._push_data()
 
-    # ── 删除 ──
+    # ── 删除/右键 ──
     def _delete_question(self, qid):
-        reply = QMessageBox.question(
-            self, "确认删除", "确定要删除这道题目吗？此操作不可恢复。",
+        reply = QMessageBox.question(self, "确认删除",
+            "确定要删除这道题目吗？此操作不可恢复。",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
-        images = models.get_question_images(qid)
-        for img in images:
-            if os.path.exists(img["image_path"]):
-                os.remove(img["image_path"])
+        if reply != QMessageBox.Yes: return
+        for img in models.get_question_images(qid):
+            if os.path.exists(img["image_path"]): os.remove(img["image_path"])
         models.delete_question(qid)
         self._do_search()
 
-    # ── 右键菜单 ──
     def _show_row_context(self, q):
         menu = QMenu(self)
         a_view = menu.addAction("查看详情")
@@ -418,331 +376,184 @@ class QuestionListPanel(QWidget):
         a_reset = menu.addAction("重置错题计数")
         menu.addSeparator()
         a_del = menu.addAction("删除")
-        pos = self.cursor().pos()
-        action = menu.exec_(pos)
-        if action == a_edit:
-            self.edit_requested.emit(q["id"])
-        elif action == a_del:
-            self._delete_question(q["id"])
+        action = menu.exec_(self.cursor().pos())
+        if action == a_edit: self.edit_requested.emit(q["id"])
+        elif action == a_del: self._delete_question(q["id"])
         elif action == a_reset:
-            models.reset_wrong_count(q["id"])
-            self._do_search()
-        elif action == a_view:
-            self._show_detail(q)
+            models.reset_wrong_count(q["id"]); self._do_search()
+        elif action == a_view: self._show_detail(q)
 
     def _show_detail(self, q):
-        detail = f"【题目】\n{q['question_text'] or '[图片]'}\n\n"
-        detail += f"【答案】\n{q['answer_text'] or '[图片]'}\n\n"
-        if q.get("notes"):
-            detail += f"【备注】\n{q['notes']}\n\n"
+        d = f"【题目】\n{q['question_text'] or '[图片]'}\n\n【答案】\n{q['answer_text'] or '[图片]'}\n\n"
+        if q.get("notes"): d += f"【备注】\n{q['notes']}\n\n"
         tags = models.get_question_tags(q["id"])
-        if tags:
-            detail += f"【标签】{'、'.join(t['name'] for t in tags)}\n\n"
-        detail += f"【做错次数】{q['wrong_count']}"
-        QMessageBox.information(self, "题目详情", detail)
+        if tags: d += f"【标签】{'、'.join(t['name'] for t in tags)}\n\n"
+        d += f"【做错次数】{q['wrong_count']}"
+        QMessageBox.information(self, "题目详情", d)
 
     # ── 批量操作 ──
     def _get_selected_or_all(self):
-        selected = self._persistent_selected_ids
-        if selected:
-            return [q for q in self.all_questions if q["id"] in selected]
-        return self.all_questions
+        s = self._persistent_selected_ids
+        return [q for q in self.all_questions if q["id"] in s] if s else self.all_questions
 
     def _batch_move_category(self):
         to_edit = self._get_selected_or_all()
-        if not to_edit:
-            QMessageBox.warning(self, "提示", "未选中任何题目。")
-            return
+        if not to_edit: return QMessageBox.warning(self, "提示", "未选中任何题目。")
         name, ok = QInputDialog.getText(self, "新建分类", "请输入新分类名称：")
-        if not ok or not name.strip():
-            return
-        success, msg = models.add_category(name.strip())
-        if not success:
-            QMessageBox.warning(self, "错误", msg)
-            return
-        all_cats = models.get_all_categories()
-        new_id = next((c["id"] for c in all_cats if c["name"] == name.strip()), None)
-        if new_id is None:
-            return
-        models.batch_set_category([q["id"] for q in to_edit], new_id)
-        QMessageBox.information(self, "完成",
-            f"已创建分类「{name.strip()}」并将 {len(to_edit)} 道题目移入。")
-        self._refresh_filters()
-        self._do_search()
+        if not ok or not name.strip(): return
+        s, msg = models.add_category(name.strip())
+        if not s: return QMessageBox.warning(self, "错误", msg)
+        ac = models.get_all_categories()
+        nid = next((c["id"] for c in ac if c["name"] == name.strip()), None)
+        if nid is None: return
+        models.batch_set_category([q["id"] for q in to_edit], nid)
+        QMessageBox.information(self, "完成", f"已创建分类「{name.strip()}」并将 {len(to_edit)} 道题目移入。")
+        self._refresh_filters(); self._do_search()
 
     def _batch_add_tags(self):
         to_edit = self._get_selected_or_all()
-        if not to_edit:
-            QMessageBox.warning(self, "提示", "未选中任何题目。")
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("添加标签")
-        dlg.setMinimumSize(360, 300)
+        if not to_edit: return QMessageBox.warning(self, "提示", "未选中任何题目。")
+        dlg = QDialog(self); dlg.setWindowTitle("添加标签"); dlg.setMinimumSize(360, 300)
         layout = QVBoxLayout(dlg)
         layout.addWidget(QLabel("选择要添加的标签（可多选）："))
-        all_tags = models.get_all_tags()
-        checks = []
+        all_tags = models.get_all_tags(); checks = []
         for tag in all_tags:
-            cb = QCheckBox(tag["name"])
-            cb.setStyleSheet(
-                f"QCheckBox {{ color: {tag.get('color', '#4A90D9')};"
-                f" font-weight: bold; font-size: 14px; spacing: 6px; }}")
-            cb._tag_id = tag["id"]
-            checks.append(cb)
-            layout.addWidget(cb)
+            cb = QCheckBox(tag["name"]); cb._tag_id = tag["id"]
+            cb.setStyleSheet(f"QCheckBox {{ color: {tag.get('color', '#4A90D9')}; font-weight: bold; font-size: 14px; }}")
+            checks.append(cb); layout.addWidget(cb)
         layout.addWidget(QLabel("—— 或创建新标签 ——"))
-        row = QHBoxLayout()
-        row.addWidget(QLabel("名称:"))
-        name_edit = LineEdit()
-        name_edit.setPlaceholderText("新标签名称")
-        row.addWidget(name_edit)
-        row.addWidget(QLabel("颜色:"))
-        color_btn = PushButton()
-        color_btn.setFixedSize(28, 28)
-        color_btn.setStyleSheet(
-            "background-color: #4A90D9; border: 1px solid #999; border-radius: 4px;")
-        color_btn.setCursor(Qt.PointingHandCursor)
-        new_color = ['#4A90D9']
-        presets = ['#E74C3C', '#E67E22', '#F1C40F', '#2ECC71', '#1ABC9C',
-                   '#3498DB', '#9B59B6', '#E91E63', '#795548', '#95A5A6']
-        preset_row = QHBoxLayout()
-        preset_row.setSpacing(4)
+        row = QHBoxLayout(); row.addWidget(QLabel("名称:"))
+        name_edit = LineEdit(); name_edit.setPlaceholderText("新标签名称"); row.addWidget(name_edit)
+        row.addWidget(QLabel("颜色:")); color_btn = PushButton(); color_btn.setFixedSize(28, 28)
+        color_btn.setStyleSheet("background-color: #4A90D9; border: 1px solid #999; border-radius: 4px;")
+        color_btn.setCursor(Qt.PointingHandCursor); new_color = ['#4A90D9']
+        presets = ['#E74C3C','#E67E22','#F1C40F','#2ECC71','#1ABC9C','#3498DB','#9B59B6','#E91E63','#795548','#95A5A6']
+        pr = QHBoxLayout(); pr.setSpacing(4)
         for pc in presets:
-            pb = PushButton()
-            pb.setFixedSize(24, 24)
-            pb.setCursor(Qt.PointingHandCursor)
-            pb.setStyleSheet(
-                f"background-color: {pc}; border: 1px solid #999; border-radius: 12px;")
-            pb.clicked.connect(
-                lambda checked, c=pc, cb=color_btn, nc=new_color:
-                nc.__setitem__(0, c) or cb.setStyleSheet(
-                    f"background-color: {c}; border: 1px solid #999; border-radius: 4px;"))
-            preset_row.addWidget(pb)
-        layout.addLayout(preset_row)
-        def pick_color():
+            pb = PushButton(); pb.setFixedSize(24, 24); pb.setCursor(Qt.PointingHandCursor)
+            pb.setStyleSheet(f"background-color: {pc}; border: 1px solid #999; border-radius: 12px;")
+            pb.clicked.connect(lambda ch, c=pc, cb=color_btn, nc=new_color: nc.__setitem__(0, c) or cb.setStyleSheet(f"background-color: {c}; border: 1px solid #999; border-radius: 4px;"))
+            pr.addWidget(pb)
+        layout.addLayout(pr)
+        def pc():
             c = QColorDialog.getColor()
-            if c.isValid():
-                new_color[0] = c.name()
-                color_btn.setStyleSheet(
-                    f"background-color: {c.name()}; border: 1px solid #999; border-radius: 4px;")
-        color_btn.clicked.connect(pick_color)
-        row.addWidget(color_btn)
-        layout.addLayout(row)
+            if c.isValid(): new_color[0] = c.name(); color_btn.setStyleSheet(f"background-color: {c.name()}; border: 1px solid #999; border-radius: 4px;")
+        color_btn.clicked.connect(pc); row.addWidget(color_btn); layout.addLayout(row)
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        layout.addWidget(btns)
-        if dlg.exec_() != QDialog.Accepted:
-            return
+        btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject); layout.addWidget(btns)
+        if dlg.exec_() != QDialog.Accepted: return
         tag_ids = [cb._tag_id for cb in checks if cb.isChecked()]
-        new_name = name_edit.text().strip()
-        if new_name:
-            tid, err = models.add_tag(new_name, new_color[0])
-            if tid:
-                tag_ids.append(tid)
+        nn = name_edit.text().strip()
+        if nn:
+            tid, err = models.add_tag(nn, new_color[0])
+            if tid: tag_ids.append(tid)
             elif err and "UNIQUE" not in err.upper():
                 for t in models.get_all_tags():
-                    if t["name"] == new_name:
-                        tag_ids.append(t["id"])
-                        break
-        if not tag_ids:
-            return
+                    if t["name"] == nn: tag_ids.append(t["id"]); break
+        if not tag_ids: return
         models.batch_set_tags([q["id"] for q in to_edit], tag_ids)
         QMessageBox.information(self, "完成", f"已为 {len(to_edit)} 道题目添加标签。")
         self._do_search()
 
     def _export_questions(self):
         to_export = self._get_selected_or_all()
-        if not to_export:
-            QMessageBox.warning(self, "提示", "当前没有题目可导出。")
-            return
+        if not to_export: return QMessageBox.warning(self, "提示", "当前没有题目可导出。")
         parent_dir = QFileDialog.getExistingDirectory(self, "选择导出位置")
-        if not parent_dir:
-            return
+        if not parent_dir: return
         total = len(to_export)
         label = f"已选中 {total} 道" if self._persistent_selected_ids else f"当前筛选共 {total} 道"
-        reply = QMessageBox.question(
-            self, "确认导出",
-            f"将导出 {label} 题目。\n导出格式为包含 index.html 和图片的文件夹。\n确认继续？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        if reply != QMessageBox.Yes:
-            return
-        progress = QProgressDialog("正在准备导出...", "取消", 0, 100, self)
-        progress.setWindowTitle("导出题库")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        QApplication.processEvents()
-        cancelled = [False]
-        def on_progress(step, cur, total):
-            if progress.wasCanceled():
-                cancelled[0] = True
-                return True
-            label = f"{step} ({cur}/{total})" if total != "1" else step
-            progress.setLabelText(label)
-            try:
-                ci, ct = int(cur), int(total)
-                pct = 95 if step.startswith("生成") else int(min(5, 5 * ci / max(ct, 1)))
-                progress.setValue(pct)
-            except ValueError:
-                pass
-            QApplication.processEvents()
-            return False
+        reply = QMessageBox.question(self, "确认导出", f"将导出 {label} 题目。\n确认继续？", QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes: return
         try:
-            success, result = export_questions(to_export, parent_dir, on_progress)
+            success, result = export_questions(to_export, parent_dir, None)
         except Exception as e:
-            progress.close()
-            QMessageBox.critical(self, "导出失败", f"导出过程中发生错误：\n{str(e)}")
-            return
-        progress.setValue(100)
-        progress.close()
-        if cancelled[0]:
-            QMessageBox.information(self, "已取消", "导出已取消。")
-        elif success:
-            msg = QMessageBox(self)
-            msg.setWindowTitle("导出成功")
-            msg.setText(f"已导出 {total} 道题目。")
+            return QMessageBox.critical(self, "导出失败", str(e))
+        if success:
+            msg = QMessageBox(self); msg.setWindowTitle("导出成功"); msg.setText(f"已导出 {total} 道题目。")
             msg.setInformativeText(f"位置：{result}")
-            open_btn = msg.addButton("打开文件夹", QMessageBox.AcceptRole)
-            msg.addButton("关闭", QMessageBox.RejectRole)
+            ob = msg.addButton("打开文件夹", QMessageBox.AcceptRole); msg.addButton("关闭", QMessageBox.RejectRole)
             msg.exec_()
-            if msg.clickedButton() == open_btn:
-                subprocess.Popen(f'explorer "{result}"')
+            if msg.clickedButton() == ob: subprocess.Popen(f'explorer "{result}"')
         else:
             QMessageBox.critical(self, "导出失败", str(result))
 
     # ── 分类/标签管理 ──
     def _refresh_filters(self):
         self._refreshing = True
-        self.cat_filter.blockSignals(True)
-        self.tag_filter.blockSignals(True)
+        self.cat_filter.blockSignals(True); self.tag_filter.blockSignals(True)
         try:
             self.cat_filter.clear()
             self.cat_filter.addItem("全部分类", userData=None)
             self.cat_filter.addItem("★ 星标收藏夹", userData=-1)
             self.cat_filter.addItem("✗ 错题集", userData=-2)
-            self.cat_filter.addItem("──────────")
-            self.cat_filter.setItemEnabled(3, False)
+            self.cat_filter.addItem("──────────"); self.cat_filter.setItemEnabled(3, False)
             for cat in models.get_all_categories():
                 self.cat_filter.addItem(cat["name"], userData=cat["id"])
-        finally:
-            pass
-        self.tag_filter.clear()
-        self.tag_filter.addItem("全部标签", userData=None)
-        for tag in models.get_all_tags():
-            self.tag_filter.addItem(tag["name"], userData=tag["id"])
-        if self.cat_filter.count() > 0:
-            self.cat_filter.setCurrentIndex(0)
-        self.cat_filter.blockSignals(False)
-        self.tag_filter.blockSignals(False)
-        self._refreshing = False
-        self._update_cat_btns()
+        finally: pass
+        self.tag_filter.clear(); self.tag_filter.addItem("全部标签", userData=None)
+        for tag in models.get_all_tags(): self.tag_filter.addItem(tag["name"], userData=tag["id"])
+        if self.cat_filter.count() > 0: self.cat_filter.setCurrentIndex(0)
+        self.cat_filter.blockSignals(False); self.tag_filter.blockSignals(False)
+        self._refreshing = False; self._update_cat_btns()
         self.tag_filter.setContextMenuPolicy(Qt.CustomContextMenu)
-        try:
-            self.tag_filter.customContextMenuRequested.disconnect()
-        except Exception:
-            pass
+        try: self.tag_filter.customContextMenuRequested.disconnect()
+        except Exception: pass
         self.tag_filter.customContextMenuRequested.connect(self._on_tag_context_menu)
 
     def _update_cat_btns(self):
-        cat_id = self.cat_filter.currentData()
-        show = cat_id is not None and cat_id > 0
-        self.cat_rename_btn.setVisible(show)
-        self.cat_del_btn.setVisible(show)
+        cat_id = self.cat_filter.currentData(); show = cat_id is not None and cat_id > 0
+        self.cat_rename_btn.setVisible(show); self.cat_del_btn.setVisible(show)
 
     def _rename_category(self):
         cat_id = self.cat_filter.currentData()
-        if not cat_id or cat_id <= 0:
-            return
-        name, ok = QInputDialog.getText(self, "重命名分类", "新名称：",
-                                         text=self.cat_filter.currentText())
+        if not cat_id or cat_id <= 0: return
+        name, ok = QInputDialog.getText(self, "重命名分类", "新名称：", text=self.cat_filter.currentText())
         if ok and name.strip():
-            models.rename_category(cat_id, name.strip())
-            self._refresh_filters()
-            self._do_search()
+            models.rename_category(cat_id, name.strip()); self._refresh_filters(); self._do_search()
 
     def _delete_category(self):
         cat_id = self.cat_filter.currentData()
-        if not cat_id or cat_id <= 0:
-            return
-        reply = QMessageBox.question(
-            self, "确认删除",
-            f"确定要删除分类「{self.cat_filter.currentText()}」吗？\n该分类下的题目将变为未分类。",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            models.delete_category(cat_id)
-            self._refresh_filters()
-            self._do_search()
+        if not cat_id or cat_id <= 0: return
+        r = QMessageBox.question(self, "确认删除", f"确定要删除分类「{self.cat_filter.currentText()}」吗？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r == QMessageBox.Yes: models.delete_category(cat_id); self._refresh_filters(); self._do_search()
 
     def _on_tag_context_menu(self, pos):
-        idx = self.tag_filter.currentIndex()
-        tag_id = self.tag_filter.itemData(idx) if idx >= 0 else None
-        if not tag_id:
-            return
+        idx = self.tag_filter.currentIndex(); tag_id = self.tag_filter.itemData(idx) if idx >= 0 else None
+        if not tag_id: return
         menu = QMenu(self)
         menu.addAction("编辑标签", lambda: self._safe_edit_tag(tag_id))
         menu.addAction("删除标签", lambda: self._delete_tag(tag_id))
         menu.exec_(self.tag_filter.mapToGlobal(pos))
 
     def _safe_edit_tag(self, tag_id):
-        try:
-            self._edit_tag_dialog(tag_id)
-        except Exception:
-            pass
+        try: self._edit_tag_dialog(tag_id)
+        except Exception: pass
 
     def _edit_tag_dialog(self, tag_id):
-        all_tags = models.get_all_tags()
-        tag_info = next((t for t in all_tags if t["id"] == tag_id), None)
-        if tag_info is None:
-            return
-        self._show_tag_editor(tag_id, tag_info["name"],
-                              tag_info.get("color", "#4A90D9"))
+        at = models.get_all_tags(); ti = next((t for t in at if t["id"] == tag_id), None)
+        if ti is None: return
+        self._show_tag_editor(tag_id, ti["name"], ti.get("color", "#4A90D9"))
 
     def _show_tag_editor(self, tag_id, tag_name, tag_color):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("编辑标签")
-        dlg.setMinimumSize(320, 150)
-        dl = QVBoxLayout(dlg)
-        nr = QHBoxLayout()
-        nr.addWidget(QLabel("名称:"))
-        ne = LineEdit(tag_name)
-        nr.addWidget(ne)
-        dl.addLayout(nr)
-        cr = QHBoxLayout()
-        cr.addWidget(QLabel("颜色:"))
-        cb = PushButton()
-        cb.setFixedSize(28, 28)
-        cur = [tag_color]
-        cb.setStyleSheet(
-            f"background-color: {cur[0]}; border:1px solid #999; border-radius:4px;")
+        dlg = QDialog(self); dlg.setWindowTitle("编辑标签"); dlg.setMinimumSize(320, 150)
+        dl = QVBoxLayout(dlg); nr = QHBoxLayout(); nr.addWidget(QLabel("名称:"))
+        ne = LineEdit(tag_name); nr.addWidget(ne); dl.addLayout(nr)
+        cr = QHBoxLayout(); cr.addWidget(QLabel("颜色:")); cb = PushButton(); cb.setFixedSize(28, 28)
+        cur = [tag_color]; cb.setStyleSheet(f"background-color: {cur[0]}; border:1px solid #999; border-radius:4px;")
         def epc():
             c = QColorDialog.getColor()
-            if c.isValid():
-                cur[0] = c.name()
-                cb.setStyleSheet(
-                    f"background-color:{c.name()}; border:1px solid #999; border-radius:4px;")
-        cb.clicked.connect(epc)
-        cr.addWidget(cb)
-        dl.addLayout(cr)
+            if c.isValid(): cur[0] = c.name(); cb.setStyleSheet(f"background-color:{c.name()}; border:1px solid #999; border-radius:4px;")
+        cb.clicked.connect(epc); cr.addWidget(cb); dl.addLayout(cr)
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        dl.addWidget(btns)
+        btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject); dl.addWidget(btns)
         if dlg.exec_() == QDialog.Accepted:
             nn = ne.text().strip()
             if nn and (nn != tag_name or cur[0] != tag_color):
-                models.update_tag(tag_id, nn, cur[0])
-                self._refresh_filters()
-                self._do_search()
+                models.update_tag(tag_id, nn, cur[0]); self._refresh_filters(); self._do_search()
 
     def _delete_tag(self, tag_id):
-        reply = QMessageBox.question(
-            self, "确认删除", "确定要删除此标签吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            models.delete_tag(tag_id)
-            self._refresh_filters()
-            self._do_search()
+        r = QMessageBox.question(self, "确认删除", "确定要删除此标签吗？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r == QMessageBox.Yes: models.delete_tag(tag_id); self._refresh_filters(); self._do_search()
 
     # ── 生命周期 ──
     def on_shown(self):
@@ -751,5 +562,4 @@ class QuestionListPanel(QWidget):
         self._do_search()
 
     def update_dynamic_styles(self):
-        scale = AppSettings().font_scale
-        self.webview.page().runJavaScript(f"setFontScale({scale})")
+        self.webview.page().runJavaScript(f"setFontScale({AppSettings().font_scale})")
