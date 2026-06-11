@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)"
+    ]
+  },
+  "autoMode": {
+    "allow": [
+      "Git operations on all branches including master — checkout, merge, push, pull, and any other git commands",
+      "$defaults"
+    ],
+    "hard_deny": [
+      "$defaults"
+    ],
+    "soft_deny": [
+      "$defaults"
+    ]
+  }
+}

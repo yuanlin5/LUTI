@@ -3,13 +3,12 @@
  主窗口 —— Fluent 侧边栏导航 + 多页面内容区
 =============================================================================
 """
-import sys, subprocess
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QStackedWidget, QLabel,
     QMessageBox, QApplication,
 )
 from PyQt5.QtCore import Qt, QEvent, QRectF, QRect
-from PyQt5.QtGui import QIcon, QFont
+from PyQt5.QtGui import QIcon
 from qfluentwidgets import (
     MSFluentWindow, NavigationInterface, NavigationItemPosition,
     FluentIcon, setTheme, Theme, InfoBar, InfoBarPosition,
@@ -27,30 +26,13 @@ from ui.exam_panel import ExamPanel
 from ui.settings_panel import SettingsPanel
 
 
-# ============================================================================
-# 导航按钮增强 —— 放大图标 + 调整文字
-# ============================================================================
-
 def _patch_nav_button(btn):
-    """图标左 + 文字右的横向布局，图标 24×24，按钮高度 44px，宽度按内容适配"""
-    ICON_SZ = 24         # 图标大小
-    ICON_X = 10          # 图标距左
-    GAP = 8              # 图标与文字间距
-    TEXT_RPAD = 14       # 文字右侧留白
-    BTN_H = 44           # 按钮高度
+    """Monkey-patch NavigationBarPushButton to enlarge icon and adjust layout
+       — icon: 28×28 (from 20×20), shifted up to avoid text overlap
+       — text: shifted down by 8px to give icon breathing room."""
 
-    # 计算图标垂直居中
-    icon_y = (BTN_H - ICON_SZ) // 2          # 44-24=20 → y=10
-    # 文字起始 x = 图标右 + 间距
-    text_x = ICON_X + ICON_SZ + GAP          # 10+24+8=42
-    # 文字宽度 = 按钮宽 - 文字起始 - 右侧留白
-    # 中文4个字约需80px（含字体放大余量），按钮宽=10+24+8+120+14=176
-    BTN_MIN_W = ICON_X + ICON_SZ + GAP + 120 + TEXT_RPAD  # ≈176
-
-    btn.setMinimumWidth(BTN_MIN_W)
-    btn.setMaximumWidth(9999)
-    btn.setMinimumHeight(BTN_H)
-    btn.setMaximumHeight(BTN_H)              # 固定高度
+    # Patch _drawIcon to render at 28×28
+    orig_draw_icon = btn._drawIcon
 
     def patched_draw_icon(painter):
         if (btn.isPressed or not btn.isEnter) and \
@@ -59,9 +41,9 @@ def _patch_nav_button(btn):
         if not btn.isEnabled():
             painter.setOpacity(0.4)
         if btn._isSelectedTextVisible:
-            rect = QRectF(ICON_X, icon_y, ICON_SZ, ICON_SZ)
+            rect = QRectF(16, 1, 28, 28)
         else:
-            rect = QRectF(ICON_X, icon_y + btn.iconAni.offset, ICON_SZ, ICON_SZ)
+            rect = QRectF(16, 1 + btn.iconAni.offset, 28, 28)
         selected = btn._selectedIcon or btn._icon
         if isinstance(selected, FluentIconBase) and \
            (btn.isSelected or btn.isAboutSelected):
@@ -74,6 +56,7 @@ def _patch_nav_button(btn):
             drawIcon(btn._icon, painter, rect)
     btn._drawIcon = patched_draw_icon
 
+    # Patch _drawText to shift text down (from y=32 → y=38)
     def patched_draw_text(painter):
         if btn.isSelected and not btn._isSelectedTextVisible:
             return
@@ -83,43 +66,37 @@ def _patch_nav_button(btn):
         else:
             painter.setPen(Qt.white if isDarkTheme() else Qt.black)
         painter.setFont(btn.font())
-        # 文字垂直居中，水平靠左（从 text_x 到 按钮右减留白）
-        text_w = btn.width() - text_x - TEXT_RPAD
-        rect = QRect(text_x, 0, text_w, BTN_H)
-        painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter, btn.text())
+        rect = QRect(0, 38, btn.width(), 22)
+        painter.drawText(rect, Qt.AlignCenter, btn.text())
     btn._drawText = patched_draw_text
 
 
-# ============================================================================
-# 主窗口
-# ============================================================================
-
 class MainWindow(MSFluentWindow):
-    """主窗口：Fluent 侧边栏 + QStackedWidget"""
+    """主窗口：Fluent 侧边栏 + QStackedWidget 切换 4 个功能面板"""
 
-    # ── switchTo：支持字符串路由键 ──
     def switchTo(self, interface):
-        """切换面板（支持字符串 routeKey），切换后自动触发 on_shown()"""
+        """切换面板并自动触发 on_shown（支持字符串 routeKey 和 QWidget）"""
+        super().switchTo(interface)
+        # 若传入的是字符串（routeKey），找到对应的 QWidget
+        target = interface
         if isinstance(interface, str):
             for i in range(self.stackedWidget.count()):
                 w = self.stackedWidget.widget(i)
                 if w.objectName() == interface:
-                    interface = w
+                    target = w
                     break
-        super().switchTo(interface)
         try:
-            if hasattr(interface, 'on_shown') and not isinstance(interface, str):
-                interface.on_shown()
+            if hasattr(target, 'on_shown') and not isinstance(target, str):
+                target.on_shown()
         except Exception:
             pass
 
-    # ── 构造 ──
     def __init__(self):
         super().__init__()
         self.settings = AppSettings()
         self.setWindowTitle(WINDOW_TITLE)
         self.setMinimumSize(900, 600)
-        setTheme(Theme.AUTO)
+        setTheme(Theme.AUTO)  # 跟随系统亮/暗色
 
         geo = self.settings.load_window_geometry()
         if geo:
@@ -131,19 +108,27 @@ class MainWindow(MSFluentWindow):
         self._setup_panels()
         self._setup_navigation()
         self._connect_signals()
+
+        # 加载全局样式表
         self._apply_stylesheet()
+
+        # 加宽侧边栏 + 放大图标
         self._fix_sidebar()
-        self._setup_restart_button()
+
+        # 默认显示录入题目（switchTo 自动触发 on_shown）
         self.switchTo(self.add_question_panel)
+
         QApplication.instance().installEventFilter(self)
 
-    # ── 面板注册 ──
+    # ── 面板 + 导航 ────────────────────────────────────────────────
     def _setup_panels(self):
         self.add_question_panel = AddQuestionPanel()
         self.question_list_panel = QuestionListPanel()
         self.exam_panel = ExamPanel()
         self.settings_panel = SettingsPanel()
 
+        # 注册面板——使用中文名称 + 对应图标
+        # (routeKey, panel, icon, position)
         panel_configs = [
             ("录入题目", self.add_question_panel, FluentIcon.EDIT,
              NavigationItemPosition.TOP),
@@ -151,16 +136,17 @@ class MainWindow(MSFluentWindow):
              NavigationItemPosition.TOP),
             ("组卷考试", self.exam_panel, FluentIcon.EDUCATION,
              NavigationItemPosition.TOP),
-            ("设置",     self.settings_panel, FluentIcon.SETTING,
+            ("设置", self.settings_panel, FluentIcon.SETTING,
              NavigationItemPosition.BOTTOM),
         ]
         for route, panel, icon, pos in panel_configs:
             panel.setObjectName(route)
             self.addSubInterface(panel, icon, route, position=pos)
 
-    # ── 导航栏 ──
     def _setup_navigation(self):
         nav = self.navigationInterface
+
+        # 底部版本标签
         ver_btn = PushButton("v1.0 — 王若水")
         ver_btn.setFlat(True)
         ver_btn.setStyleSheet("color: #888; font-size: 12px;")
@@ -168,108 +154,37 @@ class MainWindow(MSFluentWindow):
         nav.addWidget("versionLabel", ver_btn,
                        position=NavigationItemPosition.BOTTOM)
 
-    # ── 侧边栏微调 ──
     def _fix_sidebar(self):
+        """加宽侧边栏以适应中文文字 + 放大导航按钮图标 + 调整文字位置"""
         nav = self.navigationInterface
+        # 侧边栏最小宽度（容纳中文 + 图标后仍有余量）
+        nav.setMinimumWidth(100)
 
+        # 放大每个导航按钮的图标并下移文字
         from qfluentwidgets.components.navigation.navigation_bar import \
             NavigationBarPushButton
-
-        # 先打补丁，让按钮获得正确的尺寸
         for btn in nav.findChildren(NavigationBarPushButton):
             try:
                 _patch_nav_button(btn)
             except Exception:
                 pass
 
-        # 布局微调：间距 + 弹性撑开 ScrollArea（让底部按钮沉底）
-        from PyQt5.QtWidgets import QVBoxLayout, QScrollArea
-        for child in nav.children():
-            if isinstance(child, QVBoxLayout):
-                child.setSpacing(0)
-                child.setContentsMargins(0, 4, 0, 4)
-                # 找到 ScrollArea 所在位置，设置 stretch=1 让它撑满剩余空间
-                for i in range(child.count()):
-                    item = child.itemAt(i)
-                    if item.widget() and isinstance(item.widget(), QScrollArea):
-                        child.setStretch(i, 1)        # stretch=1 撑满
-                        # 内部按钮面板：间距 + 弹性 spacer 推底部按钮
-                        scroll = item.widget()
-                        inner = scroll.widget()
-                        if inner and inner.layout():
-                            il = inner.layout()
-                            il.setSpacing(6)
-                            il.setContentsMargins(8, 0, 8, 0)
-                            # 找到"设置"前面的位置插入 stretch spacer
-                            for j in range(il.count()):
-                                it = il.itemAt(j)
-                                if it and it.widget():
-                                    txt = it.widget().text() if hasattr(it.widget(), 'text') else ''
-                                    if '设置' in txt:
-                                        il.insertStretch(j, 1)
-                                        break
-                        break
-                break
+    def _setup_menu(self):
+        pass  # MSFluentWindow 不支持 QMenuBar，导航栏替代
 
-        # 侧栏宽度
-        nav.setMinimumWidth(165)
-
-    # ── 一键重启 ──
-    def _setup_restart_button(self):
-        """右下角临时重启按钮"""
-        self._restart_btn = PushButton("⟳ 重启")
-        self._restart_btn.setFixedSize(80, 32)
-        self._restart_btn.setStyleSheet("""
-            PushButton {
-                background: #0078D4; color: white;
-                border-radius: 6px; font-size: 13px; font-weight: bold;
-            }
-            PushButton:hover {
-                background: #106EBE;
-            }
-            PushButton:pressed {
-                background: #005A9E;
-            }
-        """)
-        self._restart_btn.clicked.connect(self._restart_app)
-        self._restart_btn.setParent(self)
-        self._restart_btn.raise_()
-        self._restart_btn.show()
-
-    def _restart_app(self):
-        """重启应用程序"""
-        reply = QMessageBox.question(
-            self, "确认重启", "确定要重启软件吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            subprocess.Popen([sys.executable] + sys.argv)
-            QApplication.quit()
-
-    def _position_restart_button(self):
-        """将重启按钮定位到窗口右下角"""
-        x = self.width() - self._restart_btn.width() - 20
-        y = self.height() - self._restart_btn.height() - 20
-        self._restart_btn.move(x, y)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if hasattr(self, '_restart_btn'):
-            self._position_restart_button()
-
-    # ── 信号连接 ──
     def _connect_signals(self):
         self.question_list_panel.edit_requested.connect(self._on_edit_question)
         self.settings_panel.font_changed.connect(self._on_font_changed)
         self.settings_panel.input_lines_changed.connect(self._on_input_lines_changed)
         self.settings_panel.image_mode_changed.connect(self._on_image_mode_changed)
         self.settings_panel.exam_default_changed.connect(self._on_exam_default_changed)
-        self.settings_panel.shortcut_changed.connect(self._on_shortcut_changed)
 
-    # ── 导航 ──
+    # ── 导航回调 ──────────────────────────────────────────────────
     def _nav_to(self, idx):
+        """跳转面板（switchTo 自动触发 on_shown）"""
         route_keys = ["录入题目", "题库管理", "组卷考试"]
-        panels = [self.add_question_panel, self.question_list_panel, self.exam_panel]
+        panels = [self.add_question_panel, self.question_list_panel,
+                   self.exam_panel]
         if 0 <= idx < len(panels):
             self.navigationInterface.setCurrentItem(route_keys[idx])
             self.switchTo(panels[idx])
@@ -283,8 +198,9 @@ class MainWindow(MSFluentWindow):
         self.switchTo(self.add_question_panel)
         self.add_question_panel.load_question(qid)
 
-    # ── 样式 ──
+    # ── 全局样式 ──────────────────────────────────────────────────
     def _apply_stylesheet(self):
+        """加载并应用全局 QSS 样式表"""
         try:
             qss_path = _os.path.join(_os.path.dirname(
                 _os.path.abspath(__file__)), "styles.qss")
@@ -294,15 +210,14 @@ class MainWindow(MSFluentWindow):
         except Exception:
             pass
 
-    # ── 信号处理 ──
+    # ── 信号处理 ──────────────────────────────────────────────────
     def _on_font_changed(self):
+        # 重新加载全局样式表（字号已通过 settings 更新）
         self._apply_stylesheet()
+        # 更新各面板中的动态样式
         self.add_question_panel.update_input_heights()
         self.add_question_panel.update_dynamic_styles()
-        try:
-            self.exam_panel.update_dynamic_styles()
-        except Exception:
-            pass
+        self.exam_panel.update_dynamic_styles()
         self.question_list_panel.update_dynamic_styles()
 
     def _on_input_lines_changed(self):
@@ -314,16 +229,12 @@ class MainWindow(MSFluentWindow):
     def _on_exam_default_changed(self, count):
         self.exam_panel.set_default_count(count)
 
-    def _on_shortcut_changed(self):
-        """快捷键变更时无需额外操作——QuestionListPanel 在每次按键时动态读取"""
-        pass
-
     def _switch_and_export(self):
         self.navigationInterface.setCurrentItem("题库管理")
-        self.switchTo(self.question_list_panel)
+        self.switchTo(self.question_list_panel)  # on_shown 已在 switchTo 中自动调用
         self.question_list_panel._export_questions()
 
-    # ── 图标 ──
+    # ── 图标 + 关于 ───────────────────────────────────────────────
     def _load_app_icon(self):
         try:
             config_path = _os.path.join(_os.path.dirname(_os.path.dirname(
@@ -347,12 +258,11 @@ class MainWindow(MSFluentWindow):
             "<p>作者：<b>王若水</b></p>"
         )
 
-    # ── 窗口事件 ──
+    # ── 窗口 + 缩放 ──────────────────────────────────────────────
     def closeEvent(self, event):
         self.settings.save_window_geometry(self.saveGeometry())
         super().closeEvent(event)
 
-    # ── 全局事件（仅 Ctrl+滚轮）──
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Wheel:
             if event.modifiers() & Qt.ControlModifier:

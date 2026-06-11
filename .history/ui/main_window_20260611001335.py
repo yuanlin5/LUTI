@@ -3,13 +3,12 @@
  主窗口 —— Fluent 侧边栏导航 + 多页面内容区
 =============================================================================
 """
-import sys, subprocess
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QStackedWidget, QLabel,
     QMessageBox, QApplication,
 )
 from PyQt5.QtCore import Qt, QEvent, QRectF, QRect
-from PyQt5.QtGui import QIcon, QFont
+from PyQt5.QtGui import QIcon
 from qfluentwidgets import (
     MSFluentWindow, NavigationInterface, NavigationItemPosition,
     FluentIcon, setTheme, Theme, InfoBar, InfoBarPosition,
@@ -44,8 +43,8 @@ def _patch_nav_button(btn):
     # 文字起始 x = 图标右 + 间距
     text_x = ICON_X + ICON_SZ + GAP          # 10+24+8=42
     # 文字宽度 = 按钮宽 - 文字起始 - 右侧留白
-    # 中文4个字约需80px（含字体放大余量），按钮宽=10+24+8+120+14=176
-    BTN_MIN_W = ICON_X + ICON_SZ + GAP + 120 + TEXT_RPAD  # ≈176
+    # 使用默认 text_width=56 保守估算，按钮最小宽=10+24+8+56+14=112
+    BTN_MIN_W = ICON_X + ICON_SZ + GAP + 56 + TEXT_RPAD  # ≈112
 
     btn.setMinimumWidth(BTN_MIN_W)
     btn.setMaximumWidth(9999)
@@ -133,7 +132,6 @@ class MainWindow(MSFluentWindow):
         self._connect_signals()
         self._apply_stylesheet()
         self._fix_sidebar()
-        self._setup_restart_button()
         self.switchTo(self.add_question_panel)
         QApplication.instance().installEventFilter(self)
 
@@ -182,80 +180,17 @@ class MainWindow(MSFluentWindow):
             except Exception:
                 pass
 
-        # 布局微调：间距 + 弹性撑开 ScrollArea（让底部按钮沉底）
-        from PyQt5.QtWidgets import QVBoxLayout, QScrollArea
+        # 按钮间距
+        from PyQt5.QtWidgets import QVBoxLayout
         for child in nav.children():
             if isinstance(child, QVBoxLayout):
-                child.setSpacing(0)
-                child.setContentsMargins(0, 4, 0, 4)
-                # 找到 ScrollArea 所在位置，设置 stretch=1 让它撑满剩余空间
-                for i in range(child.count()):
-                    item = child.itemAt(i)
-                    if item.widget() and isinstance(item.widget(), QScrollArea):
-                        child.setStretch(i, 1)        # stretch=1 撑满
-                        # 内部按钮面板：间距 + 弹性 spacer 推底部按钮
-                        scroll = item.widget()
-                        inner = scroll.widget()
-                        if inner and inner.layout():
-                            il = inner.layout()
-                            il.setSpacing(6)
-                            il.setContentsMargins(8, 0, 8, 0)
-                            # 找到"设置"前面的位置插入 stretch spacer
-                            for j in range(il.count()):
-                                it = il.itemAt(j)
-                                if it and it.widget():
-                                    txt = it.widget().text() if hasattr(it.widget(), 'text') else ''
-                                    if '设置' in txt:
-                                        il.insertStretch(j, 1)
-                                        break
-                        break
+                child.setSpacing(6)
+                # 侧栏宽度 = 按钮最小宽 + 左右内边距(~18)
+                child.setContentsMargins(9, 4, 9, 4)
                 break
 
-        # 侧栏宽度
-        nav.setMinimumWidth(165)
-
-    # ── 一键重启 ──
-    def _setup_restart_button(self):
-        """右下角临时重启按钮"""
-        self._restart_btn = PushButton("⟳ 重启")
-        self._restart_btn.setFixedSize(80, 32)
-        self._restart_btn.setStyleSheet("""
-            PushButton {
-                background: #0078D4; color: white;
-                border-radius: 6px; font-size: 13px; font-weight: bold;
-            }
-            PushButton:hover {
-                background: #106EBE;
-            }
-            PushButton:pressed {
-                background: #005A9E;
-            }
-        """)
-        self._restart_btn.clicked.connect(self._restart_app)
-        self._restart_btn.setParent(self)
-        self._restart_btn.raise_()
-        self._restart_btn.show()
-
-    def _restart_app(self):
-        """重启应用程序"""
-        reply = QMessageBox.question(
-            self, "确认重启", "确定要重启软件吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            subprocess.Popen([sys.executable] + sys.argv)
-            QApplication.quit()
-
-    def _position_restart_button(self):
-        """将重启按钮定位到窗口右下角"""
-        x = self.width() - self._restart_btn.width() - 20
-        y = self.height() - self._restart_btn.height() - 20
-        self._restart_btn.move(x, y)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if hasattr(self, '_restart_btn'):
-            self._position_restart_button()
+        # 侧栏宽度适配按钮宽度（按钮 ~112 + 边距 18 = 180）
+        nav.setMinimumWidth(180)
 
     # ── 信号连接 ──
     def _connect_signals(self):
@@ -264,7 +199,6 @@ class MainWindow(MSFluentWindow):
         self.settings_panel.input_lines_changed.connect(self._on_input_lines_changed)
         self.settings_panel.image_mode_changed.connect(self._on_image_mode_changed)
         self.settings_panel.exam_default_changed.connect(self._on_exam_default_changed)
-        self.settings_panel.shortcut_changed.connect(self._on_shortcut_changed)
 
     # ── 导航 ──
     def _nav_to(self, idx):
@@ -299,10 +233,7 @@ class MainWindow(MSFluentWindow):
         self._apply_stylesheet()
         self.add_question_panel.update_input_heights()
         self.add_question_panel.update_dynamic_styles()
-        try:
-            self.exam_panel.update_dynamic_styles()
-        except Exception:
-            pass
+        self.exam_panel.update_dynamic_styles()
         self.question_list_panel.update_dynamic_styles()
 
     def _on_input_lines_changed(self):
@@ -313,10 +244,6 @@ class MainWindow(MSFluentWindow):
 
     def _on_exam_default_changed(self, count):
         self.exam_panel.set_default_count(count)
-
-    def _on_shortcut_changed(self):
-        """快捷键变更时无需额外操作——QuestionListPanel 在每次按键时动态读取"""
-        pass
 
     def _switch_and_export(self):
         self.navigationInterface.setCurrentItem("题库管理")

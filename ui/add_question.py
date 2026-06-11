@@ -368,7 +368,8 @@ class AddQuestionPanel(QWidget):
 
         # 底部按钮栏（在滚动区外面，始终固定）
         btn_bar = CardWidget()
-        btn_bar.setStyleSheet("QFrame { background-color: {color_bg}; border-top: 1px solid #E0E6ED; }")
+        btn_bar.setStyleSheet(
+            "QFrame { background-color: #ECECEC; border-top: 1px solid #E0E6ED; }")
         btn_bar_layout = QHBoxLayout(btn_bar)
         btn_bar_layout.setContentsMargins(30, 12, 30, 12)
 
@@ -607,10 +608,14 @@ class AddQuestionPanel(QWidget):
         The first entry is always "无分类" (no category) with data ``None``,
         followed by every category row in the database.
         """
+        self.category_combo.blockSignals(True)
         self.category_combo.clear()
-        self.category_combo.addItem("无分类", None)
+        self.category_combo.addItem("无分类", userData=None)
         for cat in models.get_all_categories():
-            self.category_combo.addItem(cat["name"], cat["id"])
+            self.category_combo.addItem(cat["name"], userData=cat["id"])
+        if self.category_combo.count() > 0:
+            self.category_combo.setCurrentIndex(0)
+        self.category_combo.blockSignals(False)
 
     # ------------------------------------------------------------------
     #  Tag management
@@ -876,3 +881,7 @@ class AddQuestionPanel(QWidget):
         for edit in [self.question_edit, self.answer_edit, self.notes_edit]:
             edit.setMinimumHeight(h)
             edit.setMaximumHeight(h * 3)
+
+    def update_dynamic_styles(self):
+        """字体缩放后更新样式（当前无需额外操作，update_input_heights 已处理）"""
+        pass
