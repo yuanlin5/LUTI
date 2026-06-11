@@ -278,7 +278,7 @@ class QuestionDelegate(QStyledItemDelegate):
                     th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
                                          Qt.TextWordWrap, text).height() + 4
                 return QSize(option.rect.width(), max(48, ih + th + 8))
-        # 答案列：展开时计算完整高度，收起时用按钮高度
+        # 答案列：展开时计算完整高度（原图大小）
         if col == COL_ANSWER:
             panel = self._panel
             expanded = panel and index.row() in getattr(panel, '_expanded_answers', set())
@@ -286,20 +286,19 @@ class QuestionDelegate(QStyledItemDelegate):
                 q = index.data(Qt.UserRole)
                 if q:
                     q_imgs, a_imgs = index.data(Qt.UserRole + 1)
-                    ih = 0
+                    ih, iw = 0, 0
                     if a_imgs and os.path.exists(a_imgs[0]["image_path"]):
                         pixmap = QPixmap(a_imgs[0]["image_path"])
-                        col_w = max(50, option.rect.width() - 8)
-                        if pixmap.width() > col_w:
-                            pixmap = pixmap.scaledToWidth(col_w, Qt.SmoothTransformation)
+                        iw = pixmap.width()
                         ih = pixmap.height() + 4
                     text = q.get("answer_text", "")
                     th = 0
+                    text_w = max(100, option.rect.width())
                     if text:
                         fm = QFontMetrics(option.font)
-                        th = fm.boundingRect(0, 0, max(50, option.rect.width() - 8), 0,
+                        th = fm.boundingRect(0, 0, text_w, 0,
                                              Qt.TextWordWrap, text).height() + 4
-                    return QSize(option.rect.width(), max(48, ih + th + 8))
+                    return QSize(max(200, iw + 8), max(48, ih + th + 8))
         return super().sizeHint(option, index)
 
     def editorEvent(self, event, model, option, index):
@@ -382,8 +381,7 @@ class QuestionDelegate(QStyledItemDelegate):
             y = rect.y() + 4
             if a_imgs and os.path.exists(a_imgs[0]["image_path"]):
                 pixmap = QPixmap(a_imgs[0]["image_path"])
-                if pixmap.width() > rect.width() - 8:
-                    pixmap = pixmap.scaledToWidth(rect.width() - 8, Qt.SmoothTransformation)
+                # 原图大小显示，不缩放
                 painter.drawPixmap(rect.x() + 4, y, pixmap)
                 y += pixmap.height() + 4
             if a_text:
@@ -684,6 +682,7 @@ class QuestionListPanel(QWidget):
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
         self.table.setAutoScroll(False)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
@@ -867,7 +866,11 @@ class QuestionListPanel(QWidget):
             self._refreshing_table = False
 
     def _update_pagination(self, total, total_pages):
-        self.stats_label.setText(f"共 {total} 道题目")
+        count = len(self._persistent_selected_ids)
+        if count:
+            self.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
+        else:
+            self.stats_label.setText(f"共 {total} 道题目")
         self.page_label.setText(
             f"第 {self.current_page + 1} / {total_pages} 页")
         self.prev_btn.setEnabled(self.current_page > 0)
