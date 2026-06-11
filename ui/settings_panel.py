@@ -20,11 +20,66 @@ from qfluentwidgets import (
 from config import AppSettings
 
 
+class ShortcutCaptureButton(PushButton):
+    """快捷键捕获按钮：点击后按下新快捷键即可修改"""
+    shortcut_captured = pyqtSignal(str, str)  # action_id, new_key_sequence
+
+    def __init__(self, action_id, current_key, parent=None):
+        super().__init__(parent)
+        self.setText(current_key)
+        self.action_id = action_id
+        self._capturing = False
+        self._normal_text = current_key
+        self.setObjectName("secondaryBtn")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumWidth(150)
+        self.clicked.connect(self._start_capture)
+
+    def _start_capture(self):
+        self._capturing = True
+        self.setText("按下快捷键...")
+        self.setStyleSheet(
+            "PushButton { border: 2px solid #4A90D9; background: #FFF8E1;"
+            " color: #333; font-weight: bold; border-radius: 6px; padding: 6px 12px; }")
+        self.setFocus()
+
+    def keyPressEvent(self, event):
+        if not self._capturing:
+            super().keyPressEvent(event)
+            return
+        modifiers = []
+        if event.modifiers() & Qt.ControlModifier:
+            modifiers.append("Ctrl")
+        if event.modifiers() & Qt.ShiftModifier:
+            modifiers.append("Shift")
+        if event.modifiers() & Qt.AltModifier:
+            modifiers.append("Alt")
+        key = event.key()
+        # 跳过纯修饰键
+        if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
+            return
+        from PyQt5.QtGui import QKeySequence
+        key_name = QKeySequence(key).toString()
+        if key_name and modifiers:
+            seq = "+".join(modifiers + [key_name])
+        elif key_name:
+            seq = key_name
+        else:
+            seq = ""
+        self._capturing = False
+        self._normal_text = seq
+        self.setText(seq if seq else "未设置")
+        self.setStyleSheet("")
+        self.shortcut_captured.emit(self.action_id, seq)
+        self.clearFocus()
+
+
 class SettingsPanel(QWidget):
     font_changed = pyqtSignal()
     input_lines_changed = pyqtSignal()
     image_mode_changed = pyqtSignal()
     exam_default_changed = pyqtSignal(int)
+    shortcut_changed = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -214,6 +269,75 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(exam_frame)
 
+        # ---- 快捷键设置 ----
+        shortcut_frame = QFrame()
+        shortcut_frame.setObjectName("card")
+        shortcut_layout = QVBoxLayout(shortcut_frame)
+        shortcut_layout.setContentsMargins(20, 16, 20, 16)
+        shortcut_layout.setSpacing(8)
+
+        t = QLabel("快捷键设置")
+        t.setObjectName("sectionTitle")
+        shortcut_layout.addWidget(t)
+        d = QLabel("点击按钮后按下新的快捷键即可修改，支持 Ctrl/Shift/Alt 组合键")
+        d.setObjectName("sectionDesc")
+        shortcut_layout.addWidget(d)
+
+        shortcut_scroll = QScrollArea()
+        shortcut_scroll.setWidgetResizable(True)
+        shortcut_scroll.setFrameShape(QFrame.NoFrame)
+        shortcut_scroll.setMaximumHeight(400)
+        shortcut_inner = QWidget()
+        shortcut_form = QVBoxLayout(shortcut_inner)
+        shortcut_form.setSpacing(8)
+
+        self._shortcut_buttons = {}
+        shortcut_labels = {
+            "select_all": "全选工作表",
+            "goto_dialog": "定位 (Go To)",
+            "select_col": "选中当前列",
+            "select_row": "选中当前行",
+            "select_region": "选中数据区域",
+            "jump_edge_up": "跳转到数据区域顶部",
+            "jump_edge_down": "跳转到数据区域底部",
+            "jump_edge_left": "跳转到数据区域左侧",
+            "jump_edge_right": "跳转到数据区域右侧",
+            "expand_up": "向上扩展选择",
+            "expand_down": "向下扩展选择",
+            "expand_left": "向左扩展选择",
+            "expand_right": "向右扩展选择",
+            "prev_page": "上一页",
+            "next_page": "下一页",
+            "clear_selection": "清除选择",
+        }
+
+        for action_id, label in shortcut_labels.items():
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel(label + "：")
+            lbl.setMinimumWidth(160)
+            row.addWidget(lbl)
+            current = self.settings.get_shortcut(action_id)
+            btn = ShortcutCaptureButton(action_id, current)
+            btn.shortcut_captured.connect(self._on_shortcut_captured)
+            self._shortcut_buttons[action_id] = btn
+            row.addWidget(btn, 1)
+            row.addStretch()
+            shortcut_form.addLayout(row)
+
+        shortcut_scroll.setWidget(shortcut_inner)
+        shortcut_layout.addWidget(shortcut_scroll)
+
+        reset_row = QHBoxLayout()
+        reset_row.addStretch()
+        reset_btn = PushButton("恢复默认快捷键")
+        reset_btn.setObjectName("secondaryBtn")
+        reset_btn.clicked.connect(self._reset_shortcuts)
+        reset_row.addWidget(reset_btn)
+        shortcut_layout.addLayout(reset_row)
+
+        layout.addWidget(shortcut_frame)
+
         # ---- 保存按钮 ----
         # 点击后将考试默认抽题数写入配置，显示成功提示
         btn_layout = QHBoxLayout()
@@ -277,6 +401,21 @@ class SettingsPanel(QWidget):
             self.status_label.setText(f"{label}路径已更新（重启生效）")
             self.status_label.setStyleSheet("color: #F5A623;")
 
+    def _on_shortcut_captured(self, action_id, key_sequence):
+        """快捷键修改后保存并通知"""
+        if key_sequence:
+            self.settings.set_shortcut(action_id, key_sequence)
+        self.shortcut_changed.emit()
+
+    def _reset_shortcuts(self):
+        """恢复所有快捷键为默认值"""
+        self.settings.reset_all_shortcuts()
+        for action_id, btn in self._shortcut_buttons.items():
+            default = self.settings.get_shortcut(action_id)
+            btn.setText(default)
+            btn._normal_text = default
+        self.shortcut_changed.emit()
+
     def on_shown(self):
         """页面每次显示时将控件值重置为 Settings 中的最新值，确保与外部修改保持同步。"""
         self.font_slider.setValue(self.settings.font_scale)
@@ -287,6 +426,11 @@ class SettingsPanel(QWidget):
         self.image_quality_combo.setCurrentIndex(max(0, idx_q))
         self.exam_count_spin.setValue(self.settings.default_exam_count)
         self.status_label.clear()
+        # 刷新快捷键按钮显示
+        for action_id, btn in self._shortcut_buttons.items():
+            current = self.settings.get_shortcut(action_id)
+            btn.setText(current)
+            btn._normal_text = current
         self.update_dynamic_styles()
 
     def update_dynamic_styles(self):

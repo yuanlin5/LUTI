@@ -18,8 +18,8 @@ from PyQt5.QtWidgets import (
     QFileDialog, QProgressDialog, QApplication, QInputDialog,
     QDialog, QCheckBox, QDialogButtonBox, QColorDialog,
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
-from PyQt5.QtGui import QPixmap, QIcon, QFontMetrics
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent, QItemSelection
+from PyQt5.QtGui import QPixmap, QIcon, QFontMetrics, QKeySequence
 from qfluentwidgets import (
     PrimaryPushButton, PushButton, TransparentPushButton,
     ComboBox, LineEdit, CardWidget,
@@ -44,6 +44,23 @@ class QuestionListPanel(QWidget):
         self.all_questions = []    # 当前筛选条件下所有题目
         self.current_page = 0      # 当前页码（0-indexed）
         self._img_labels = []  # (QLabel, file_path, col_index)
+        self._dragging = False
+        self._auto_scroll_dir = 0
+        # 快捷键动作注册表（action_id → handler 函数）
+        self._shortcut_actions = {
+            "select_all": self._handle_select_all,
+            "goto_dialog": self._show_goto_dialog,
+            "select_col": self._handle_select_col,
+            "select_row": self._handle_select_row,
+            "select_region": self._select_current_region,
+            "jump_edge_up": lambda: self._jump_to_data_edge('up'),
+            "jump_edge_down": lambda: self._jump_to_data_edge('down'),
+            "jump_edge_left": lambda: self._jump_to_data_edge('left'),
+            "jump_edge_right": lambda: self._jump_to_data_edge('right'),
+            "prev_page": self._prev_page,
+            "next_page": self._next_page,
+            "clear_selection": lambda: self.table.clearSelection(),
+        }
         self._setup_ui()
 
     def _setup_ui(self):
@@ -96,12 +113,14 @@ class QuestionListPanel(QWidget):
 
         filter_layout.addStretch()
 
-        # 选择模式按钮：点击进入/退出选择模式
-        self.select_btn = PushButton("选择")
-        self.select_btn.setObjectName("secondaryBtn")          # 灰色次要按钮样式
-        self.select_btn.setCursor(Qt.PointingHandCursor)       # 鼠标悬停变手型
-        self.select_btn.clicked.connect(self._toggle_select_mode)  # 点击→切换选择模式
-        filter_layout.addWidget(self.select_btn)
+        # 排序按钮：点击显示排序菜单
+        self.sort_btn = PushButton("排序 ▾")
+        self.sort_btn.setObjectName("secondaryBtn")
+        self.sort_btn.setCursor(Qt.PointingHandCursor)
+        self.sort_btn.clicked.connect(
+            lambda: self._show_sort_menu(
+                self.sort_btn.mapToGlobal(self.sort_btn.rect().bottomLeft())))
+        filter_layout.addWidget(self.sort_btn)
 
         self.batch_btn = PushButton("选择操作 ▾")
         self.batch_btn.setObjectName("primaryBtn")
@@ -138,12 +157,26 @@ class QuestionListPanel(QWidget):
         self._locked_widths = {}
         self._movable_cols = ()
         self._movable_ratios = {}
-        self._select_mode = False          # True=选择模式(显示复选框), False=普通模式
-        self._selected_ids = set()          # 当前被选中的题目 ID 集合
-        self._syncing_selection = False     # 防递归标志：True=正在同步中,跳过后续信号
         self._sort_col = -1       # 当前排序列 (-1=默认/恢复原状)
         self._sort_state = 0      # 0=原序, 1=升序, 2=降序
         self._original_order = [] # 保存初始顺序用于恢复
+
+    @property
+    def _selected_ids(self):
+        """计算属性：从 Qt 选择模型中动态获取被选中题目 ID 集合"""
+        result = set()
+        sel_model = self.table.selectionModel()
+        if sel_model is None:
+            return result
+        rows_seen = set()
+        for idx in sel_model.selectedIndexes():
+            r = idx.row()
+            if r not in rows_seen:
+                rows_seen.add(r)
+                q = self._get_question_at_row(r)
+                if q:
+                    result.add(q["id"])
+        return result
 
         self.table = QTableWidget()
         self.table.setColumnCount(self._col_count)
@@ -182,25 +215,35 @@ class QuestionListPanel(QWidget):
         self.table.setColumnHidden(1, True)
         self.table.setColumnHidden(7, True)
 
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setAutoScroll(False)  # 关闭默认自动滚动，用自定义速度
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._auto_scroll_timer = QTimer()
         self._auto_scroll_timer.timeout.connect(self._do_auto_scroll)
-        # Qt 选择模型变化（单击/Ctrl+单击/Shift+单击/拖拽）→ 同步到 _selected_ids + 复选框
+        # Qt 选择模型变化 → 更新选中计数
         self.table.selectionModel().selectionChanged.connect(
-            self._on_qt_selection_changed)
-        self.table.verticalHeader().setVisible(False)
+            self._update_selection_status)
+        # 行号表头（Excel 风）
+        self.table.verticalHeader().setVisible(True)
+        self.table.verticalHeader().setSectionsClickable(True)
+        self.table.verticalHeader().sectionClicked.connect(self._on_row_header_clicked)
+        # 左上角全选按钮
+        from PyQt5.QtWidgets import QAbstractButton
+        corner = self.table.findChild(QAbstractButton)
+        if corner:
+            corner.clicked.connect(self._on_corner_clicked)
         self.table.setAlternatingRowColors(True)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        # 列头点击 → 选择整列；右键 → 排序
         header.sectionClicked.connect(self._on_header_clicked)
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._on_header_context_menu)
         self.table.cellPressed.connect(self._on_cell_pressed)   # 鼠标按下→记录起始行(拖拽用)
-        self.table.itemChanged.connect(self._on_item_changed)    # 复选框手动打勾/取消→更新 _selected_ids
         self.table.viewport().installEventFilter(self)
         self.table.installEventFilter(self)
         self._last_clicked_row = -1
@@ -276,7 +319,6 @@ class QuestionListPanel(QWidget):
                 except Exception:
                     pass
 
-        self._selected_ids.clear()  # 筛选条件变化 → 旧选择失效
         try:
             if cat_id == -1:
                 self.all_questions = models.get_starred_questions(keyword, None)
@@ -310,10 +352,9 @@ class QuestionListPanel(QWidget):
         end = min(start + PAGE_SIZE, total)
         page_items = self.all_questions[start:end]
 
-        # 备份 _selected_ids（setRowCount 会触发 Qt 清空选择→_on_qt_selection_changed 清空集合）
-        saved = self._selected_ids.copy()
+        # 备份当前页选中 ID（setRowCount 会清除 Qt 的选择模型）
+        saved_ids = self._selected_ids.copy()
         self.table.setRowCount(len(page_items))   # 设定行数，触发 Qt 清空旧选择
-        self._selected_ids = saved                # 恢复备份，翻页不丢失选中状态
         self.stats_label.setText(f"共 {total} 道题目")
 
         base_index = start
@@ -325,12 +366,10 @@ class QuestionListPanel(QWidget):
             a_images = [img for img in images if img["image_type"] == "answer"]
             mode = AppSettings().image_display_mode
 
-            # 第0列：序号 / 选择框
+            # 第0列：序号
             idx_item = QTableWidgetItem(str(base_index + i + 1))
-            if self._select_mode:                                       # 选择模式下显示复选框
-                idx_item.setFlags(idx_item.flags() | Qt.ItemIsUserCheckable)  # 启用复选框
-                idx_item.setCheckState(                                 # 根据 _selected_ids 决定打勾/空
-                    Qt.Checked if q["id"] in self._selected_ids else Qt.Unchecked)
+            idx_item.setTextAlignment(Qt.AlignCenter)
+            idx_item.setFlags(idx_item.flags() & ~Qt.ItemIsUserCheckable)
             self.table.setItem(i, 0, idx_item)
 
             # 第1列：初始编号
@@ -517,12 +556,15 @@ class QuestionListPanel(QWidget):
 
             self.table.setCellWidget(i, 10, btn_widget)
 
-        # 翻页后恢复蓝色高亮：遍历当前页每一行，若题目 ID 在 _selected_ids 中则标蓝
-        if self._selected_ids:
+        # 翻页后恢复选择高亮：若题目 ID 在之前保存的集合中，则选中该行所有单元格
+        if saved_ids:
             for r in range(len(page_items)):
-                q2 = self._get_question_at_row(r)         # 获取该行对应的题目数据
-                if q2 and q2["id"] in self._selected_ids:  # 题目被选中？
-                    self.table.selectRow(r)                # → Qt 蓝色高亮该行
+                q2 = self._get_question_at_row(r)
+                if q2 and q2["id"] in saved_ids:
+                    for c in range(self._col_count):
+                        self.table.selectionModel().select(
+                            self.table.model().index(r, c),
+                            self.table.selectionModel().Select)
 
         self.page_label.setText(f"第 {self.current_page + 1} / {total_pages} 页")
         self.prev_btn.setEnabled(self.current_page > 0)
@@ -580,15 +622,57 @@ class QuestionListPanel(QWidget):
     }
 
     def _on_header_clicked(self, col):
-        if col == 0 or col == 9 or col not in self._SORT_KEYS:
+        """列头点击 = 选中整列（需求#5）。
+        Ctrl+点击 = 追加列（需求#8）；Shift+点击 = 连续列（需求#9）。"""
+        modifiers = QApplication.keyboardModifiers()
+        sel = self.table.selectionModel()
+        if modifiers & Qt.ControlModifier:
+            # Ctrl+点击：追加该列到已有选择
+            for r in range(self.table.rowCount()):
+                sel.select(self.table.model().index(r, col), sel.Select)
+        elif modifiers & Qt.ShiftModifier:
+            # Shift+点击：选择从当前列到点击列之间的所有列
+            self.table.selectColumn(col)
+        else:
+            # 普通点击：只选该列
+            self.table.clearSelection()
+            self.table.selectColumn(col)
+
+    def _on_header_context_menu(self, pos):
+        """列头右键菜单 → 排序操作"""
+        col = self.table.horizontalHeader().logicalIndexAt(pos)
+        if col not in self._SORT_KEYS:
             return
-        # 周期：0(原序) → 1(升序) → 2(降序) → 0(原序)
-        if self._sort_col == col:
-            self._sort_state = (self._sort_state + 1) % 3
+        menu = QMenu(self)
+        menu.addAction("↑ 升序排列", lambda: self._set_sort(col, 1))
+        menu.addAction("↓ 降序排列", lambda: self._set_sort(col, 2))
+        menu.addAction("— 恢复默认顺序", lambda: self._set_sort(-1, 0))
+        menu.exec_(self.table.horizontalHeader().viewport().mapToGlobal(pos))
+
+    def _set_sort(self, col, state):
+        """直接设置排序列和状态"""
+        if state == 0:
+            self._sort_col = -1
+            self._sort_state = 0
+            self.sort_btn.setText("排序 ▾")
         else:
             self._sort_col = col
-            self._sort_state = 1  # 新列从升序开始
+            self._sort_state = state
+            arrow = " ↑" if state == 1 else " ↓"
+            header_label = self._all_headers[col]
+            self.sort_btn.setText(f"排序: {header_label}{arrow}")
         self._apply_sort()
+
+    def _show_sort_menu(self, global_pos):
+        """排序按钮点击 → 显示排序菜单"""
+        menu = QMenu(self)
+        menu.addAction("— 恢复默认顺序", lambda: self._set_sort(-1, 0))
+        menu.addSeparator()
+        for col, header in enumerate(self._all_headers):
+            if col in self._SORT_KEYS:
+                menu.addAction(f"↑ {header} 升序", lambda c=col: self._set_sort(c, 1))
+                menu.addAction(f"↓ {header} 降序", lambda c=col: self._set_sort(c, 2))
+        menu.exec_(global_pos)
 
     def _apply_sort(self):
         header = self.table.horizontalHeader()
@@ -611,89 +695,34 @@ class QuestionListPanel(QWidget):
         self._refresh_table()
 
     def keyPressEvent(self, event):
-        """ESC 键 → 退出选择模式"""
-        if event.key() == Qt.Key_Escape and self._select_mode:  # 选择模式下按 ESC
-            self._toggle_select_mode()                           # → 退出选择模式
+        """键盘事件 → 快捷键分发引擎"""
+        key_seq = self._parse_key_event(event)
+        if key_seq is None:
+            super().keyPressEvent(event)
             return
+
+        # 遍历注册的快捷键，匹配则执行
+        settings = AppSettings()
+        for action_id, handler in self._shortcut_actions.items():
+            if settings.get_shortcut(action_id) == key_seq:
+                handler()
+                return
+
+        # 扩展到 Qt 原生处理（Shift+Arrow 等）
         super().keyPressEvent(event)
 
-    def _on_qt_selection_changed(self, selected, deselected):
-        """Qt 选择模型变化（单击/Ctrl/Shift/拖拽橡皮筋）→ 同步到 _selected_ids + 复选框"""
-        # 非选择模式 或 正在同步中 → 跳过，防止递归
-        if not self._select_mode or getattr(self, '_syncing_selection', False):
-            return
-        self._syncing_selection = True                       # 设置防递归标志
-        self.table.blockSignals(True)                        # 屏蔽 itemChanged 信号，防止 _on_item_changed 触发反馈循环
-        try:
-            # 处理被 Qt 取消选中的行 → 从 _selected_ids 移除 + 复选框取消打勾
-            for idx in deselected.indexes():
-                if idx.column() == 0:                        # 只处理第0列（复选框所在列）
-                    q = self._get_question_at_row(idx.row()) # 获取该行对应的题目数据
-                    if q:
-                        self._selected_ids.discard(q["id"])  # 从选中集合移除
-                        item = self.table.item(idx.row(), 0)
-                        if item:
-                            item.setCheckState(Qt.Unchecked)  # 复选框取消打勾
-            # 处理被 Qt 新选中的行 → 加入 _selected_ids + 复选框打勾
-            for idx in selected.indexes():
-                if idx.column() == 0:
-                    q = self._get_question_at_row(idx.row())
-                    if q:
-                        self._selected_ids.add(q["id"])      # 加入选中集合
-                        item = self.table.item(idx.row(), 0)
-                        if item:
-                            item.setCheckState(Qt.Checked)    # 复选框打勾
-        finally:
-            self.table.blockSignals(False)                   # 恢复 itemChanged 信号
-            self._syncing_selection = False                  # 清除防递归标志
-
-    def _update_row_checkbox(self, row):
-        """根据 _selected_ids 更新指定行的复选框打勾/取消（不刷新全表）"""
-        q = self._get_question_at_row(row)            # 获取该行对应的题目
-        if q is None:
-            return
-        item = self.table.item(row, 0)                # 获取第0列的 QTableWidgetItem
-        if item:
-            item.setCheckState(                       # 题目在选中集合中→打勾，否则→空
-                Qt.Checked if q["id"] in self._selected_ids else Qt.Unchecked)
-
-    def _toggle_select_mode(self):
-        """切换选择模式：进入→显示复选框+清空选中；退出→隐藏复选框+清空选中"""
-        self._select_mode = not self._select_mode              # 翻转模式开关
-        if self._select_mode:                                  # 进入选择模式
-            self.select_btn.setText("取消选择")                 # 按钮文字改为"取消选择"
-            self.select_btn.setObjectName("dangerBtn")         # 按钮变红色
-            self._selected_ids.clear()                         # 清空旧的选中记录
-        else:                                                  # 退出选择模式
-            self.select_btn.setText("选择")                     # 按钮文字改为"选择"
-            self.select_btn.setObjectName("secondaryBtn")      # 按钮变灰色
-            self._selected_ids.clear()                         # 清空选中记录
-        # 强制刷新按钮样式（dynamic property 需要 unpolish+polish 才能生效）
-        self.select_btn.style().unpolish(self.select_btn)
-        self.select_btn.style().polish(self.select_btn)
-        self._refresh_table()                                  # 重建表格（显示/隐藏复选框列）
+    def _update_selection_status(self):
+        """选择变化时更新底部统计标签（显示已选中数量）"""
+        count = len(self._selected_ids)
+        total = len(self.all_questions)
+        if count:
+            self.stats_label.setText(f"共 {total} 道题目 | 已选中 {count} 道")
+        else:
+            self.stats_label.setText(f"共 {total} 道题目")
 
     def _on_cell_pressed(self, row, col):
         """鼠标按下 → 记录起始行号（供 eventFilter 拖拽检测使用）"""
         self._drag_start_row = row
-
-    def _on_item_changed(self, item):
-        """用户手动点击复选框 → 更新 _selected_ids + 同步 Qt 蓝色高亮"""
-        if not self._select_mode or item.column() != 0:  # 非选择模式 或 非第0列 → 忽略
-            return
-        q = self._get_question_at_row(item.row())        # 获取该行对应的题目
-        if q is None:
-            return
-        sel = self.table.selectionModel()
-        sel.blockSignals(True)                           # 屏蔽 selectionChanged 信号，防止触发 _on_qt_selection_changed 反馈
-        if item.checkState() == Qt.Checked:              # 用户打勾
-            self._selected_ids.add(q["id"])              # → 加入选中集合
-            self.table.selectRow(item.row())             # → Qt 蓝色高亮该行
-        else:                                            # 用户取消打勾
-            self._selected_ids.discard(q["id"])          # → 从选中集合移除
-            sel.select(self.table.model().index(item.row(), 0),
-                       sel.Deselect)                     # → Qt 取消蓝色高亮
-        sel.blockSignals(False)                          # 恢复 selectionChanged 信号
 
     def _toggle_star(self, qid, btn):
         """切换星标状态"""
@@ -718,10 +747,11 @@ class QuestionListPanel(QWidget):
                 break
 
     def _get_selected_or_all(self):
-        """批量操作的题目来源：选择模式→仅返回选中的题目；普通模式→返回全部筛选结果"""
-        if self._select_mode:                                                    # 选择模式下
-            return [q for q in self.all_questions if q["id"] in self._selected_ids]  # 只返回被勾选的题目
-        return self.all_questions                                                # 普通模式→全部
+        """批量操作的题目来源：有选中→仅返回选中的题目；无选中→返回全部筛选结果"""
+        selected = self._selected_ids
+        if selected:
+            return [q for q in self.all_questions if q["id"] in selected]
+        return self.all_questions
 
     def _batch_move_category(self):
         """批量为选中题目创建新分类并移入"""
@@ -1019,15 +1049,10 @@ class QuestionListPanel(QWidget):
         self.table.resizeRowsToContents()
 
     def eventFilter(self, obj, event):
-        """← → 翻页；Shift+滚轮；拖拽自动进入选择模式+自动滚动"""
+        """Shift+滚轮横向滚动；拖拽自动滚动"""
         if obj is self.table:
             if event.type() == QEvent.KeyPress:
-                if event.key() == Qt.Key_Left:
-                    self._prev_page()
-                    return True
-                if event.key() == Qt.Key_Right:
-                    self._next_page()
-                    return True
+                # 所有键盘事件交给 keyPressEvent 处理
                 return False
         if obj is self.table.viewport():
             if event.type() == QEvent.MouseButtonRelease:
@@ -1041,9 +1066,7 @@ class QuestionListPanel(QWidget):
                     return True
             elif event.type() == QEvent.MouseMove:
                 if event.buttons() & Qt.LeftButton:           # 左键按下+鼠标移动 = 拖拽
-                    self._dragging = True                      # 标记正在拖拽
-                    if not self._select_mode:                  # 未进入选择模式？
-                        self._toggle_select_mode()             # → 自动进入选择模式
+                    self._dragging = True
                     vp_h = self.table.viewport().height()
                     edge = 30
                     py = event.pos().y()
@@ -1061,6 +1084,156 @@ class QuestionListPanel(QWidget):
             elif event.type() == QEvent.Leave:
                 self._auto_scroll_timer.stop()
         return super().eventFilter(obj, event)
+
+    # ── 快捷键引擎 ─────────────────────────────────────────────────
+    def _parse_key_event(self, event):
+        """将 QKeyEvent 转换为 'Ctrl+A' 格式的快捷键字符串"""
+        parts = []
+        if event.modifiers() & Qt.ControlModifier:
+            parts.append("Ctrl")
+        if event.modifiers() & Qt.ShiftModifier:
+            parts.append("Shift")
+        if event.modifiers() & Qt.AltModifier:
+            parts.append("Alt")
+
+        key = event.key()
+        # 跳过纯修饰键
+        if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
+            return None
+
+        key_name = QKeySequence(key).toString()
+        if key_name:
+            parts.append(key_name)
+        return "+".join(parts) if parts else key_name
+
+    # ── 选择操作方法 ────────────────────────────────────────────────
+
+    def _handle_select_all(self):
+        """Ctrl+A：全选当前页所有单元格"""
+        self.table.selectAll()
+
+    def _handle_select_col(self):
+        """Ctrl+Space：选中当前单元格所在整列"""
+        cur = self.table.currentIndex()
+        if cur.isValid():
+            self.table.selectColumn(cur.column())
+
+    def _handle_select_row(self):
+        """Shift+Space：选中当前单元格所在整行"""
+        cur = self.table.currentIndex()
+        if cur.isValid():
+            self.table.selectRow(cur.row())
+
+    def _select_current_region(self):
+        """Ctrl+Shift+Space：选中当前数据区域（连续非空矩形块）"""
+        cur = self.table.currentIndex()
+        if not cur.isValid():
+            return
+        r0, c0 = cur.row(), cur.column()
+        rc = self.table.rowCount()
+        cc = self.table.columnCount()
+
+        def _is_filled(r, c):
+            item = self.table.item(r, c)
+            widget = self.table.cellWidget(r, c)
+            return (item is not None and item.text().strip()) or widget is not None
+
+        if not _is_filled(r0, c0):
+            return
+
+        # 四向扩展找边界
+        r_top, r_bot = r0, r0
+        while r_top > 0 and _is_filled(r_top - 1, c0):
+            r_top -= 1
+        while r_bot < rc - 1 and _is_filled(r_bot + 1, c0):
+            r_bot += 1
+        c_left, c_right = c0, c0
+        while c_left > 0 and _is_filled(r0, c_left - 1):
+            c_left -= 1
+        while c_right < cc - 1 and _is_filled(r0, c_right + 1):
+            c_right += 1
+
+        top_left = self.table.model().index(r_top, c_left)
+        bot_right = self.table.model().index(r_bot, c_right)
+        self.table.selectionModel().select(
+            QItemSelection(top_left, bot_right),
+            self.table.selectionModel().ClearAndSelect)
+
+    def _jump_to_data_edge(self, direction):
+        """Ctrl+方向键：跳转到数据区域边缘"""
+        cur = self.table.currentIndex()
+        if not cur.isValid():
+            return
+        r, c = cur.row(), cur.column()
+        dr = {'up': -1, 'down': 1, 'left': 0, 'right': 0}[direction]
+        dc = {'up': 0, 'down': 0, 'left': -1, 'right': 1}[direction]
+        rc, cc = self.table.rowCount(), self.table.columnCount()
+
+        def _is_filled(rr, cc_co):
+            item = self.table.item(rr, cc_co)
+            widget = self.table.cellWidget(rr, cc_co)
+            return (item is not None and item.text().strip()) or widget is not None
+
+        nr, nc = r + dr, c + dc
+        while 0 <= nr < rc and 0 <= nc < cc and _is_filled(nr, nc):
+            nr += dr
+            nc += dc
+        nr -= dr
+        nc -= dc
+        if 0 <= nr < rc and 0 <= nc < cc:
+            self.table.setCurrentCell(nr, nc)
+
+    def _show_goto_dialog(self):
+        """F5：定位对话框，输入行列号精准跳转"""
+        from PyQt5.QtWidgets import QFormLayout, QSpinBox, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("转到单元格")
+        dlg.setMinimumWidth(300)
+        layout = QFormLayout(dlg)
+
+        row_spin = QSpinBox()
+        row_spin.setRange(1, self.table.rowCount())
+        row_spin.setValue(self.table.currentRow() + 1)
+        layout.addRow("行号:", row_spin)
+
+        col_spin = QSpinBox()
+        col_spin.setRange(1, self.table.columnCount())
+        col_spin.setValue(self.table.currentColumn() + 1)
+        layout.addRow("列号:", col_spin)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addRow(btns)
+
+        if dlg.exec_() == QDialog.Accepted:
+            r = row_spin.value() - 1
+            c = col_spin.value() - 1
+            if 0 <= r < self.table.rowCount() and 0 <= c < self.table.columnCount():
+                self.table.setCurrentCell(r, c)
+
+    # ── 行号/角标点击 ──────────────────────────────────────────────
+
+    def _on_row_header_clicked(self, row):
+        """点击行号 → 选中整行（#4）；Ctrl=追加行（#8）；Shift=连续行（#9）"""
+        modifiers = QApplication.keyboardModifiers()
+        sel = self.table.selectionModel()
+        if modifiers & Qt.ControlModifier:
+            # 切换该行的选中状态
+            first_idx = self.table.model().index(row, 0)
+            toggle_on = not sel.isSelected(first_idx)
+            for c in range(self._col_count):
+                idx = self.table.model().index(row, c)
+                sel.select(idx, sel.Select if toggle_on else sel.Deselect)
+        elif modifiers & Qt.ShiftModifier:
+            self.table.selectRow(row)  # Qt ExtendedSelection 处理连续范围
+        else:
+            self.table.clearSelection()
+            self.table.selectRow(row)
+
+    def _on_corner_clicked(self):
+        """点击左上角交叉处 → 全选所有单元格（#14）"""
+        self.table.selectAll()
 
     def _do_auto_scroll(self):
         """自定义速度自动滚动（每次滚动 1 行）"""

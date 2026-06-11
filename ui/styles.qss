@@ -198,8 +198,14 @@ QTableWidget::item {
 }
 
 QTableWidget::item:selected {
-    background-color: {color_sidebar};
+    background-color: #D2E3FC;
     color: {color_text};
+    border: 1px solid #4A90D9;
+}
+
+QTableWidget::item:focus {
+    border: 2px solid #4A90D9;
+    outline: none;
 }
 
 QHeaderView::section {

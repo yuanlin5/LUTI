@@ -264,6 +264,7 @@ class MainWindow(MSFluentWindow):
         self.settings_panel.input_lines_changed.connect(self._on_input_lines_changed)
         self.settings_panel.image_mode_changed.connect(self._on_image_mode_changed)
         self.settings_panel.exam_default_changed.connect(self._on_exam_default_changed)
+        self.settings_panel.shortcut_changed.connect(self._on_shortcut_changed)
 
     # ── 导航 ──
     def _nav_to(self, idx):
@@ -309,6 +310,10 @@ class MainWindow(MSFluentWindow):
 
     def _on_exam_default_changed(self, count):
         self.exam_panel.set_default_count(count)
+
+    def _on_shortcut_changed(self):
+        """快捷键变更时无需额外操作——QuestionListPanel 在每次按键时动态读取"""
+        pass
 
     def _switch_and_export(self):
         self.navigationInterface.setCurrentItem("题库管理")

@@ -202,6 +202,49 @@ class AppSettings:
         return self._s.value("window_geometry", None)
 
     # ------------------------------------------------------------------
+    # 快捷键配置 —— 可自定义表格操作的快捷键
+    # ------------------------------------------------------------------
+
+    SHORTCUT_DEFAULTS = {
+        "select_all": "Ctrl+A",
+        "goto_dialog": "F5",
+        "select_col": "Ctrl+Space",
+        "select_row": "Shift+Space",
+        "select_region": "Ctrl+Shift+Space",
+        "jump_edge_up": "Ctrl+Up",
+        "jump_edge_down": "Ctrl+Down",
+        "jump_edge_left": "Ctrl+Left",
+        "jump_edge_right": "Ctrl+Right",
+        "expand_up": "Shift+Up",
+        "expand_down": "Shift+Down",
+        "expand_left": "Shift+Left",
+        "expand_right": "Shift+Right",
+        "prev_page": "Ctrl+PageUp",
+        "next_page": "Ctrl+PageDown",
+        "clear_selection": "Escape",
+    }
+
+    def get_shortcut(self, action_id):
+        """获取某个动作当前的快捷键绑定"""
+        default = self.SHORTCUT_DEFAULTS.get(action_id, "")
+        return self._s.value(f"shortcut_{action_id}", default)
+
+    def set_shortcut(self, action_id, key_sequence):
+        """设置某个动作的自定义快捷键"""
+        self._s.setValue(f"shortcut_{action_id}", key_sequence)
+
+    def reset_shortcut(self, action_id):
+        """重置单个快捷键为默认值"""
+        default = self.SHORTCUT_DEFAULTS.get(action_id)
+        if default:
+            self._s.setValue(f"shortcut_{action_id}", default)
+
+    def reset_all_shortcuts(self):
+        """重置所有快捷键为默认值"""
+        for action_id, default in self.SHORTCUT_DEFAULTS.items():
+            self._s.setValue(f"shortcut_{action_id}", default)
+
+    # ------------------------------------------------------------------
     # 样式表加载 —— 将 ui/styles.qss 中的字号占位符替换为实际数值
     # 占位符对照：
     #   {font_base}    → 正文字号
