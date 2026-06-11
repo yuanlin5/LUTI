@@ -39,26 +39,29 @@ class _HighlightHeader(QHeaderView):
     _table_ref = None
 
     def paintSection(self, painter, rect, logicalIndex):
+        # 先绘制默认表头
+        super().paintSection(painter, rect, logicalIndex)
+        # 再叠加半透明高亮
         if self._table_ref is not None:
             sel = self._table_ref.selectionModel()
             highlighted = False
             if self.orientation() == Qt.Vertical:
-                # 纵向表头：检查该行是否有被选中的单元格
                 for c in range(self._table_ref.columnCount()):
                     if sel.isSelected(
                             self._table_ref.model().index(logicalIndex, c)):
                         highlighted = True
                         break
             else:
-                # 横向表头：检查该列是否有被选中的单元格
                 for r in range(self._table_ref.rowCount()):
                     if sel.isSelected(
                             self._table_ref.model().index(r, logicalIndex)):
                         highlighted = True
                         break
             if highlighted:
-                painter.fillRect(rect, QColor("#D2E3FC"))
-        super().paintSection(painter, rect, logicalIndex)
+                painter.save()
+                painter.setOpacity(0.35)
+                painter.fillRect(rect, QColor("#4A90D9"))
+                painter.restore()
 
 
 class QuestionListPanel(QWidget):
@@ -480,7 +483,7 @@ class QuestionListPanel(QWidget):
                 chip.setFixedHeight(26)
                 chip.setCursor(Qt.PointingHandCursor)
                 tid = t["id"]
-                chip.mousePressEvent = lambda e, tid=tid: self._edit_tag_dialog(tid)
+                chip.mousePressEvent = lambda e, tid=tid: self._safe_edit_tag(tid)
                 tag_layout.addWidget(chip)
             tag_layout.addStretch()
             self.table.setCellWidget(i, 5, tag_widget)
@@ -1102,6 +1105,20 @@ class QuestionListPanel(QWidget):
             if event.type() == QEvent.MouseButtonRelease:
                 self._auto_scroll_timer.stop()
                 self._dragging = False
+            elif event.type() == QEvent.MouseButtonPress:
+                if event.modifiers() & Qt.ControlModifier:
+                    # Ctrl+单击：手动切换选中，return True 阻断 Qt 二次处理
+                    pos = event.pos()
+                    row = self.table.rowAt(pos.y())
+                    col = self.table.columnAt(pos.x())
+                    if row >= 0 and col >= 0:
+                        idx = self.table.model().index(row, col)
+                        sel = self.table.selectionModel()
+                        if sel.isSelected(idx):
+                            sel.select(idx, sel.Deselect)
+                        else:
+                            sel.select(idx, sel.Select)
+                        return True
             elif event.type() == QEvent.Wheel:
                 if event.modifiers() & Qt.ShiftModifier:
                     bar = self.table.horizontalScrollBar()
@@ -1382,6 +1399,13 @@ class QuestionListPanel(QWidget):
             pass
         self.tag_filter.customContextMenuRequested.connect(
             self._on_tag_context_menu)
+
+    def _safe_edit_tag(self, tag_id):
+        """安全编辑标签：封装异常处理防止卡死"""
+        try:
+            self._edit_tag_dialog(tag_id)
+        except Exception:
+            pass
 
     def _edit_tag_dialog(self, tag_id):
         """点击标签徽章 → 编辑标签"""
